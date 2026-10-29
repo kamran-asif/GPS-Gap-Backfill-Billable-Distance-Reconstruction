@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  trip-distance-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: moveinsync-trip-distance-engine
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/moveinsync
+      - SPRING_DATASOURCE_USERNAME=moveinsync
+      - SPRING_DATASOURCE_PASSWORD=moveinsync_secret
+      - JAVA_TOOL_OPTIONS=-Xms128m -Xmx512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: moveinsync-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=moveinsync
+      - POSTGRES_USER=moveinsync
+      - POSTGRES_PASSWORD=moveinsync_secret
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moveinsync -d moveinsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:

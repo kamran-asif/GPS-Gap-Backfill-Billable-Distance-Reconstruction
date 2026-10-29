@@ -1,0 +1,152 @@
+{
+  "info": {
+    "name": "MoveInSync Trip Distance Engine API",
+    "description": "Production API Collection for MoveInSync Billing-Grade GPS Distance Rebuilding Engine",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Ingest & Calculate Trip Distance",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Tenant-ID", "value": "moveinsync-client-1" },
+          { "key": "X-User-Role", "value": "ROLE_OPERATOR" },
+          { "key": "X-User-ID", "value": "operator-007" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"tripId\": \"TRIP-BLR-1001\",\n  \"tenantId\": \"moveinsync-client-1\",\n  \"rawPings\": [\n    {\n      \"latitude\": 12.9352,\n      \"longitude\": 77.6245,\n      \"timestamp\": \"2026-10-29T18:00:00Z\",\n      \"accuracy\": 10.0\n    },\n    {\n      \"latitude\": 12.9250,\n      \"longitude\": 77.6100,\n      \"timestamp\": \"2026-10-29T18:05:00Z\",\n      \"accuracy\": 12.0\n    },\n    {\n      \"latitude\": 12.8500,\n      \"longitude\": 77.5500,\n      \"timestamp\": \"2026-10-29T18:27:00Z\",\n      \"accuracy\": 8.0\n    }\n  ],\n  \"milestones\": [\n    {\n      \"type\": \"DROP\",\n      \"employeeId\": \"EMP-RAJESH-1\",\n      \"latitude\": 12.8800,\n      \"longitude\": 77.5800,\n      \"timestamp\": \"2026-10-29T18:15:00Z\",\n      \"riderType\": \"PLANNED\",\n      \"status\": \"COMPLETED\"\n    }\n  ],\n  \"officeLocation\": {\n    \"officeId\": \"OFF-BLR-ECOSPACE\",\n    \"name\": \"Ecospace Tech Park\",\n    \"latitude\": 12.9352,\n    \"longitude\": 77.6245\n  },\n  \"tripStartTime\": \"2026-10-29T18:00:00Z\",\n  \"tripEndTime\": \"2026-10-29T18:30:00Z\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:8080/api/v1/trips/calculate",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "v1", "trips", "calculate"]
+        }
+      }
+    },
+    {
+      "name": "2. Recompute Trip with Late Pings (Signed Delta)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Tenant-ID", "value": "moveinsync-client-1" },
+          { "key": "X-User-Role", "value": "ROLE_OPERATOR" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"reason\": \"LATE_PINGS_UPLOADED_AFTER_BILLING\",\n  \"latePings\": [\n    {\n      \"latitude\": 12.8500,\n      \"longitude\": 77.5500,\n      \"timestamp\": \"2026-10-29T18:27:00Z\",\n      \"accuracy\": 8.0\n    },\n    {\n      \"latitude\": 12.8420,\n      \"longitude\": 77.5420,\n      \"timestamp\": \"2026-10-29T18:32:00Z\",\n      \"accuracy\": 10.0\n    }\n  ]\n}"
+        },
+        "url": {
+          "raw": "http://localhost:8080/api/v1/trips/TRIP-BLR-1001/recompute",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "v1", "trips", "TRIP-BLR-1001", "recompute"]
+        }
+      }
+    },
+    {
+      "name": "3. Get Trip Explainable Audit Trail",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-Tenant-ID", "value": "moveinsync-client-1" },
+          { "key": "X-User-Role", "value": "ROLE_OPERATOR" }
+        ],
+        "url": {
+          "raw": "http://localhost:8080/api/v1/trips/TRIP-BLR-1001",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "v1", "trips", "TRIP-BLR-1001"]
+        }
+      }
+    },
+    {
+      "name": "4. Get Trip Billing Adjustments (Signed Deltas)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-Tenant-ID", "value": "moveinsync-client-1" },
+          { "key": "X-User-Role", "value": "ROLE_OPERATOR" }
+        ],
+        "url": {
+          "raw": "http://localhost:8080/api/v1/trips/TRIP-BLR-1001/adjustments",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "v1", "trips", "TRIP-BLR-1001", "adjustments"]
+        }
+      }
+    },
+    {
+      "name": "5. Inspect Routing Circuit Breaker Status",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "X-Tenant-ID", "value": "moveinsync-client-1" },
+          { "key": "X-User-Role", "value": "ROLE_ADMIN" }
+        ],
+        "url": {
+          "raw": "http://localhost:8080/api/v1/admin/circuit-breaker",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "v1", "admin", "circuit-breaker"]
+        }
+      }
+    },
+    {
+      "name": "6. Trip Circuit Breaker Manually (Fault Injection)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-Tenant-ID", "value": "moveinsync-client-1" },
+          { "key": "X-User-Role", "value": "ROLE_ADMIN" }
+        ],
+        "url": {
+          "raw": "http://localhost:8080/api/v1/admin/circuit-breaker/trip",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "v1", "admin", "circuit-breaker", "trip"]
+        }
+      }
+    },
+    {
+      "name": "7. Reset Circuit Breaker",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-Tenant-ID", "value": "moveinsync-client-1" },
+          { "key": "X-User-Role", "value": "ROLE_ADMIN" }
+        ],
+        "url": {
+          "raw": "http://localhost:8080/api/v1/admin/circuit-breaker/reset",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["api", "v1", "admin", "circuit-breaker", "reset"]
+        }
+      }
+    },
+    {
+      "name": "8. Prometheus Metrics Endpoint",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "http://localhost:8080/actuator/prometheus",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "8080",
+          "path": ["actuator", "prometheus"]
+        }
+      }
+    }
+  ]
+}
