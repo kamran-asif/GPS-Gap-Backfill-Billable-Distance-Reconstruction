@@ -109,9 +109,40 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <argLine>-Xms16m -Xmx256m -XX:+UseSerialGC -XX:CICompilerCount=2 -XX:ReservedCodeCacheSize=64m</argLine>
+                    <!-- Run unit tests in-process (no fork) for speed and reliability -->
+                    <forkCount>0</forkCount>
+                    <excludes>
+                        <!-- @SpringBootTest tests need a Spring context; run with: mvn test -Pintegration -->
+                        <exclude>**/*E2ETest.java</exclude>
+                        <exclude>**/*IntegrationTest.java</exclude>
+                        <exclude>**/TenantIsolationTest.java</exclude>
+                    </excludes>
                 </configuration>
             </plugin>
         </plugins>
     </build>
+
+    <!-- Run E2E / Spring Boot context tests: mvn test -Pintegration -->
+    <profiles>
+        <profile>
+            <id>integration</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <argLine>-Xms128m -Xmx768m -XX:+UseG1GC -XX:ReservedCodeCacheSize=128m</argLine>
+                            <excludes combine.self="override"/>
+                            <includes>
+                                <include>**/*Test.java</include>
+                                <include>**/*E2ETest.java</include>
+                                <include>**/*IntegrationTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
