@@ -1,0 +1,14 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:moveinsync_test_db;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=PostgreSQL
+    driverClassName: org.h2.Driver
+    username: sa
+    password: 
+
+logging:
+  level:
+    root: WARN
+    com.moveinsync.distance: INFO
+    com.moveinsync.distance.engine.StreamCleaner: WARN
+    com.moveinsync.distance.engine.AnchorPatchEngine: WARN
+    com.moveinsync.distance.engine.TripDistanceRebuildingEngine: WARN
