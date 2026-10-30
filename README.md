@@ -65,7 +65,7 @@ The **MoveInSync Trip Distance Rebuilding Engine** reconstructs a deterministic,
 
 ---
 
-## 2. Core Engineering Guarantees
+## 3. Core Engineering Guarantees
 
 | Capability | Engineering Implementation | Key Classes |
 | :--- | :--- | :--- |
@@ -82,7 +82,84 @@ The **MoveInSync Trip Distance Rebuilding Engine** reconstructs a deterministic,
 
 ---
 
-## 3. Repository & Package Architecture
+## 4. Repository & Package Architecture
+
+### 4.1 High-Level Architecture (HLD)
+
+```mermaid
+flowchart TD
+    subgraph Ingestion ["1. Multi-Tenant Ingestion Layer"]
+        A["Driver App / GPS Tracker"] -->|"Raw Pings (Lat, Lon, Accuracy, Timestamp)"| API["TripController (/api/v1/trips)"]
+        B["Business Events (Pickups, Drops, Office)"] -->|"Milestones & No-Show Events"| API
+    end
+
+    subgraph ServiceLayer ["2. Service & Context Layer"]
+        API --> Filter["TenantFilter (X-Tenant-ID Hard Partitioning)"]
+        Filter --> Svc["TripDistanceService"]
+    end
+
+    subgraph EngineCore ["3. Pure-Java Deterministic Rebuilding Engine"]
+        Svc --> Engine["RebuildingEngine"]
+        Engine --> Stage1["Stage I: Spatial Jitter Filter (Accuracy <= 50m, Speed <= 120 km/h)"]
+        Stage1 --> Stage2["Stage II: Timeline Gap Patching (Business Milestones & Office Snap)"]
+        Stage2 --> Stage3["Stage III: Segment Distance Calculator"]
+        
+        Stage3 -->|"Gap < 70s"| Rule1["SHORT_GAP_AERIAL (Haversine)"]
+        Stage3 -->|"Gap >= 70s, Speed < 5 km/h"| Rule2["PARKED (0.0 km)"]
+        Stage3 -->|"Gap >= 70s, Speed >= 5 km/h"| RoutingSvc["RoutingService"]
+        
+        RoutingSvc --> Cache["RoutingCache (Caffeine 50k LRU)"]
+        Cache -->|"Miss"| CB["RoutingCircuitBreaker"]
+        CB -->|"Closed"| Provider["OSRM / Google Maps Routing API"]
+        CB -->|"Open / Degraded"| Fallback["1.4x Aerial Fallback (DEGRADED Flag)"]
+        
+        Stage3 --> Stage4["Stage IV: Deterministic Rounding (BigDecimal HALF_UP)"]
+    end
+
+    subgraph Persistence ["4. Audit & Ledger Persistence Layer"]
+        Stage4 --> Ledger["Append-Only Ledger (Versioned Trips v1, v2)"]
+        Ledger --> Adjustments["Signed Deltas: CREDIT_NOTE / DEBIT_NOTE"]
+        Ledger --> DB[("PostgreSQL / H2 Database")]
+    end
+```
+
+### 4.2 Sequence Flow Diagram: Outage Fallback & Post-Billing Recompute
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Vendor as Cab / Billing Client
+    participant API as TripController
+    participant Svc as TripDistanceService
+    participant Engine as RebuildingEngine
+    participant Route as RoutingService
+    participant DB as PostgreSQL / H2
+
+    Note over Vendor,DB: Phase 1: Ingestion During Maps Provider Outage
+    Vendor->>API: POST /api/v1/trips/calculate (Pings, Milestones, Office)
+    API->>Svc: calculateAndSave(evidence)
+    Svc->>Engine: clean + patch + calculate
+    Engine->>Route: getDrivingRoute(start, end)
+    Route-->>Engine: Circuit Breaker OPEN -> Fallback 1.4x Aerial
+    Engine-->>Svc: TripDistanceResult v1 = 28.80 km (DEGRADED)
+    Svc->>DB: INSERT trips v1 and trip_segments
+    Svc-->>API: 200 OK (v1 Invoice Billed)
+
+    Note over Vendor,DB: Phase 2: Provider Recovers & Late Pings Arrive
+    Vendor->>API: POST /api/v1/trips/{tripId}/recompute (Late Pings)
+    API->>Svc: recomputeTrip(tripId, updatedEvidence, reason)
+    Svc->>DB: SELECT latest trip version v1
+    Svc->>Engine: Recompute with merged pings (v2)
+    Engine->>Route: getDrivingRoute(start, end)
+    Route-->>Engine: Provider Recovered -> Live Road Distance
+    Engine-->>Svc: TripDistanceResult v2 = 30.60 km (COMPLETED)
+    Svc->>Svc: Delta: 30.60 - 28.80 = +1.80 km (CREDIT_NOTE)
+    Svc->>DB: INSERT trips v2 (v1 untouched)
+    Svc->>DB: INSERT trip_adjustments (+1.80 km CREDIT_NOTE)
+    Svc-->>API: 200 OK (Signed Delta +1.80 km)
+```
+
+### 4.3 Directory & Code Structure
 
 The core domain and distance-rebuilding engine are written in **pure, framework-free Java** (`domain`, `engine`, `routing`, `scaling`) with zero Spring or JPA annotations, making the core algorithm unit-testable in milliseconds and portable across synchronous REST, batch CLI, or Kafka stream workers.
 
