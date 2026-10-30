@@ -41,6 +41,12 @@ public enum DistanceRule {
     DEGRADED_PROVIDER_ERROR,
 
     /**
+     * Outbound routing call was rejected by the client-side rate limiter to protect the provider quota.
+     * Fallback 1.4 * aerial applied. Trip marked DEGRADED.
+     */
+    DEGRADED_RATE_LIMITED,
+
+    /**
      * Generic straight-line fallback.
      */
     FALLBACK_AERIAL

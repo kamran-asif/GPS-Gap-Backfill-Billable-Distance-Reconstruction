@@ -7,6 +7,7 @@ import com.moveinsync.distance.entity.TripEntity;
 import com.moveinsync.distance.entity.TripSegmentEntity;
 import com.moveinsync.distance.engine.TripDistanceRebuildingEngine;
 import com.moveinsync.distance.security.TenantContext;
+import com.moveinsync.distance.service.TripBatchService;
 import com.moveinsync.distance.service.TripDistanceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -19,37 +20,56 @@ import java.util.*;
 public class TripController {
 
     private final TripDistanceService tripService;
+    private final TripBatchService tripBatchService;
 
-    public TripController(TripDistanceService tripService) {
+    public TripController(TripDistanceService tripService, TripBatchService tripBatchService) {
         this.tripService = tripService;
+        this.tripBatchService = tripBatchService;
     }
 
     @PostMapping("/calculate")
     @PreAuthorize("hasAnyRole('OPERATOR', 'ADMIN')")
-    public ResponseEntity<TripCalculationResponse> calculateTripDistance(@RequestBody TripCalculationRequest request) {
+    public ResponseEntity<TripCalculationResponse> calculateTripDistance(
+            @RequestBody TripCalculationRequest request,
+            @RequestHeader(value = "X-Idempotency-Key", required = false) String idempotencyKey) {
         if (request.getTripId() == null || request.getTripId().isBlank()) {
             throw new IllegalArgumentException("tripId is required");
         }
 
         TripEvidence evidence = mapRequestToEvidence(request);
-        TripDistanceResult result = tripService.calculateAndSave(evidence);
+        TripDistanceResult result = tripService.calculateAndSave(evidence, idempotencyKey);
 
         return ResponseEntity.ok(mapResultToResponse(result));
+    }
+
+    @PostMapping("/batch-calculate")
+    @PreAuthorize("hasAnyRole('OPERATOR', 'ADMIN')")
+    public ResponseEntity<BatchCalculationResponse> batchCalculateTripDistances(
+            @RequestBody List<TripCalculationRequest> requests,
+            @RequestParam(defaultValue = "4") int workers) {
+        if (requests == null || requests.isEmpty()) {
+            throw new IllegalArgumentException("requests must not be empty");
+        }
+
+        List<TripEvidence> evidences = new ArrayList<>(requests.size());
+        for (TripCalculationRequest request : requests) {
+            if (request.getTripId() == null || request.getTripId().isBlank()) {
+                throw new IllegalArgumentException("tripId is required for every batch item");
+            }
+            evidences.add(mapRequestToEvidence(request));
+        }
+
+        return ResponseEntity.ok(tripBatchService.calculateInParallel(evidences, workers));
     }
 
     @PostMapping("/{tripId}/recompute")
     @PreAuthorize("hasAnyRole('OPERATOR', 'ADMIN')")
     public ResponseEntity<RecomputeResponse> recomputeTrip(@PathVariable String tripId,
                                                            @RequestBody RecomputeRequest request) {
-        // Retrieve existing trip to fetch base evidence
-        TripEntity existing = tripService.getTrip(tripId, null)
-                .orElseThrow(() -> new IllegalArgumentException("Trip not found: " + tripId));
-
-        // Build updated evidence with late pings
-        List<GpsPing> allPings = new ArrayList<>();
+        List<GpsPing> latePings = new ArrayList<>();
         if (request.getLatePings() != null) {
             for (GpsPingDto dto : request.getLatePings()) {
-                allPings.add(new GpsPing(Coordinate.of(dto.getLatitude(), dto.getLongitude()), dto.getTimestamp(), dto.getAccuracy()));
+                latePings.add(new GpsPing(Coordinate.of(dto.getLatitude(), dto.getLongitude()), dto.getTimestamp(), dto.getAccuracy()));
             }
         }
 
@@ -69,22 +89,8 @@ public class TripController {
             }
         }
 
-        TripEvidence updatedEvidence = new TripEvidence(
-                tripId,
-                existing.getTenantId(),
-                allPings,
-                milestones,
-                List.of(),
-                null,
-                Map.of(),
-                null,
-                null,
-                null,
-                EngineConfig.defaultConfig()
-        );
-
         TripDistanceRebuildingEngine.RecomputeExecutionResult execResult =
-                tripService.recomputeTrip(tripId, updatedEvidence, request.getReason());
+                tripService.recomputeTripWithLatePings(tripId, latePings, milestones, request.getReason());
 
         RecomputeResponse response = new RecomputeResponse();
         RecomputeDelta delta = execResult.getDelta();

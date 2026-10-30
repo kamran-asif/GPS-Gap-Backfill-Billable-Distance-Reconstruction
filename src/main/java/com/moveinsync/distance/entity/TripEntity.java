@@ -9,7 +9,8 @@ import java.util.List;
 @Table(name = "trips", indexes = {
         @Index(name = "idx_trip_tenant_version", columnList = "trip_id, tenant_id, version", unique = true),
         @Index(name = "idx_trip_tenant", columnList = "tenant_id"),
-        @Index(name = "idx_trip_status", columnList = "status, tenant_id")
+        @Index(name = "idx_trip_status", columnList = "status, tenant_id"),
+        @Index(name = "idx_trip_idempotency", columnList = "trip_id, tenant_id, idempotency_key")
 })
 public class TripEntity {
 
@@ -67,6 +68,12 @@ public class TripEntity {
 
     @Column(name = "calculated_at", nullable = false)
     private Instant calculatedAt;
+
+    @Column(name = "idempotency_key")
+    private String idempotencyKey;
+
+    @Column(name = "evidence_snapshot", columnDefinition = "TEXT")
+    private String evidenceSnapshot;
 
     @OneToMany(cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     @JoinColumn(name = "trip_record_id")
@@ -224,5 +231,21 @@ public class TripEntity {
 
     public void setSegments(List<TripSegmentEntity> segments) {
         this.segments = segments;
+    }
+
+    public String getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public void setIdempotencyKey(String idempotencyKey) {
+        this.idempotencyKey = idempotencyKey;
+    }
+
+    public String getEvidenceSnapshot() {
+        return evidenceSnapshot;
+    }
+
+    public void setEvidenceSnapshot(String evidenceSnapshot) {
+        this.evidenceSnapshot = evidenceSnapshot;
     }
 }

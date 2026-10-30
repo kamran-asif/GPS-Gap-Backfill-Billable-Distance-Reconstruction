@@ -48,3 +48,11 @@ logging:
     com.moveinsync.distance: DEBUG
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [Tenant:%X{tenant_id:-none}] [Trace:%X{trace_id:-none}] - %msg%n"
+
+engine:
+  routing:
+    rate-limit:
+      # Client-side token bucket guarding outbound routing provider calls (Scaling Level 7).
+      # 0 permits/second disables the limiter (default, single-instance behaviour).
+      permits-per-second: 0
+      burst: 0

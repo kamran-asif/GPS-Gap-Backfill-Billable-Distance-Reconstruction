@@ -2,6 +2,7 @@ package com.moveinsync.distance.config;
 
 import com.moveinsync.distance.domain.EngineConfig;
 import com.moveinsync.distance.routing.*;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 

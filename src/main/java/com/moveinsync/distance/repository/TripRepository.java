@@ -17,5 +17,8 @@ public interface TripRepository extends JpaRepository<TripEntity, Long> {
 
     List<TripEntity> findAllByStatusAndTenantId(String status, String tenantId);
 
+    Optional<TripEntity> findFirstByTripIdAndTenantIdAndIdempotencyKeyOrderByVersionDesc(
+            String tripId, String tenantId, String idempotencyKey);
+
     boolean existsByTripIdAndTenantId(String tripId, String tenantId);
 }

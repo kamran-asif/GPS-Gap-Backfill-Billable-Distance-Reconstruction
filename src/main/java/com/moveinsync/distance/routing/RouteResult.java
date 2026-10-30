@@ -35,6 +35,10 @@ public final class RouteResult implements Serializable {
         return new RouteResult(0.0, 0, RouteStatus.PROVIDER_ERROR, message);
     }
 
+    public static RouteResult rateLimited(String message) {
+        return new RouteResult(0.0, 0, RouteStatus.RATE_LIMITED, message);
+    }
+
     public double getDistanceKm() {
         return distanceKm;
     }

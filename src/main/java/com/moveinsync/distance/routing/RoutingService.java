@@ -5,6 +5,7 @@ import com.moveinsync.distance.domain.EngineConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -17,11 +18,20 @@ public final class RoutingService {
     private final RoutingProvider provider;
     private final RoutingCache cache;
     private final RoutingCircuitBreaker circuitBreaker;
+    private final RoutingRateLimiter rateLimiter;
 
     public RoutingService(RoutingProvider provider, RoutingCache cache, RoutingCircuitBreaker circuitBreaker) {
+        this(provider, cache, circuitBreaker, RoutingRateLimiter.unlimited());
+    }
+
+    public RoutingService(RoutingProvider provider,
+                          RoutingCache cache,
+                          RoutingCircuitBreaker circuitBreaker,
+                          RoutingRateLimiter rateLimiter) {
         this.provider = Objects.requireNonNull(provider, "RoutingProvider must not be null");
         this.cache = Objects.requireNonNull(cache, "RoutingCache must not be null");
         this.circuitBreaker = Objects.requireNonNull(circuitBreaker, "RoutingCircuitBreaker must not be null");
+        this.rateLimiter = Objects.requireNonNull(rateLimiter, "RoutingRateLimiter must not be null");
     }
 
     public static RoutingService createDefault(RoutingProvider provider, EngineConfig config) {
@@ -44,14 +54,22 @@ public final class RoutingService {
             sessionStats.recordCacheMiss();
         }
 
-        // 2. Check Circuit Breaker
+        // 2. Client-side outbound rate limiting (protects provider quota under horizontal scale)
+        if (!rateLimiter.tryAcquire()) {
+            log.warn("Outbound routing call throttled by client-side rate limiter (limit {} permits/sec) for route {} -> {}",
+                    rateLimiter.getPermitsPerSecond(), start, end);
+            return RouteResult.rateLimited(String.format(Locale.US,
+                    "Client-side rate limiter rejected call (limit %.1f permits/sec)", rateLimiter.getPermitsPerSecond()));
+        }
+
+        // 3. Check Circuit Breaker
         if (!circuitBreaker.allowRequest()) {
             log.warn("Routing call rejected by Circuit Breaker (state: {}) for route {} -> {}",
                     circuitBreaker.getState(), start, end);
             return RouteResult.circuitOpen();
         }
 
-        // 3. Invoke external provider
+        // 4. Invoke external provider
         try {
             RouteResult providerResult = provider.fetchRoute(start, end);
             if (providerResult.isSuccess()) {

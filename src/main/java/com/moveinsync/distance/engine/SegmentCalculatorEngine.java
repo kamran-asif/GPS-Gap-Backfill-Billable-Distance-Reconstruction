@@ -162,6 +162,17 @@ public final class SegmentCalculatorEngine {
                             i + 1, start, end, deltaSeconds, aerialKm, fallbackKm,
                             DistanceRule.DEGRADED_PROVIDER_ERROR, explanation, false);
 
+                } else if (routeResult.getStatus() == RouteStatus.RATE_LIMITED) {
+                    isDegraded = true;
+                    double fallbackKm = aerialKm * config.getCircuitFallbackMultiplier();
+                    String explanation = String.format(Locale.US,
+                            "Outbound routing call throttled by client-side rate limiter (%s); fallback %.2fx aerial (%.3f km) applied; trip marked DEGRADED",
+                            routeResult.getErrorMessage(), config.getCircuitFallbackMultiplier(), fallbackKm);
+
+                    segmentResult = new SegmentResult(
+                            i + 1, start, end, deltaSeconds, aerialKm, fallbackKm,
+                            DistanceRule.DEGRADED_RATE_LIMITED, explanation, false);
+
                 } else {
                     // Provider succeeded or cache hit
                     double routedKm = routeResult.getDistanceKm();

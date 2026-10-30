@@ -76,7 +76,17 @@ public class AdminController {
         int count = tripService.reconcileDegradedTrips();
         return ResponseEntity.ok(Map.of(
                 "reconciledCount", count,
-                "message", "Triggered reconciliation check for degraded trips"
+                "message", "Triggered auto-reconciliation for degraded trips"
+        ));
+    }
+
+    @PostMapping("/cache/invalidate")
+    public ResponseEntity<Map<String, Object>> invalidateCache() {
+        long previousSize = routingService.getCache().getEstimatedSize();
+        routingService.getCache().invalidateAll();
+        return ResponseEntity.ok(Map.of(
+                "status", "CACHE_INVALIDATED",
+                "evictedEntriesEstimate", previousSize
         ));
     }
 }

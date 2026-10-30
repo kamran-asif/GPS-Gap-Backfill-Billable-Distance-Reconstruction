@@ -28,6 +28,7 @@ public final class TripDistanceResult implements Serializable {
     private final int droppedAccuracyCount;
     private final int anchorsInsertedCount;
     private final Instant calculatedAt;
+    private final long processingTimeMs;
 
     public TripDistanceResult(String tripId,
                               String tenantId,
@@ -44,7 +45,8 @@ public final class TripDistanceResult implements Serializable {
                               int droppedTeleportCount,
                               int droppedAccuracyCount,
                               int anchorsInsertedCount,
-                              Instant calculatedAt) {
+                              Instant calculatedAt,
+                              long processingTimeMs) {
         this.tripId = Objects.requireNonNull(tripId, "tripId must not be null");
         this.tenantId = Objects.requireNonNull(tenantId, "tenantId must not be null");
         this.version = version;
@@ -61,6 +63,7 @@ public final class TripDistanceResult implements Serializable {
         this.droppedAccuracyCount = droppedAccuracyCount;
         this.anchorsInsertedCount = anchorsInsertedCount;
         this.calculatedAt = calculatedAt != null ? calculatedAt : Instant.now();
+        this.processingTimeMs = processingTimeMs;
     }
 
     public String getTripId() {
@@ -125,6 +128,10 @@ public final class TripDistanceResult implements Serializable {
 
     public Instant getCalculatedAt() {
         return calculatedAt;
+    }
+
+    public long getProcessingTimeMs() {
+        return processingTimeMs;
     }
 
     @Override

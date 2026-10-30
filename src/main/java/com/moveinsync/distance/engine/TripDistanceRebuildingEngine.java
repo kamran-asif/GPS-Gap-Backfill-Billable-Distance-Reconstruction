@@ -73,7 +73,8 @@ public final class TripDistanceRebuildingEngine {
                 cleanerResult.getTeleportCount(),
                 cleanerResult.getLowAccuracyCount(),
                 anchorsInserted,
-                Instant.now()
+                Instant.now(),
+                0L // Will be set by service layer
         );
     }
 

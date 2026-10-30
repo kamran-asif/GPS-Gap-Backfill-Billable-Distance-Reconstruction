@@ -4,5 +4,6 @@ public enum RouteStatus {
     SUCCESS,
     CACHE_HIT,
     CIRCUIT_OPEN,
-    PROVIDER_ERROR
+    PROVIDER_ERROR,
+    RATE_LIMITED
 }
