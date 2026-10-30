@@ -259,49 +259,49 @@ sequenceDiagram
     participant Clean as StreamCleaner
     participant Anchor as AnchorPatchEngine
     participant Calc as SegmentCalculatorEngine
-    participant Route as RoutingService (Cache+RL+CB)
+    participant Route as RoutingService
     participant DB as PostgreSQL / H2
 
-    Note over Vendor,DB: Phase 1: Initial Trip Ingestion During External Maps API Outage
-    Vendor->>API: POST /api/v1/trips/calculate (Raw Pings + Milestones + Office)
+    Note over Vendor,DB: Phase 1: Initial Ingestion During Provider Outage
+    Vendor->>API: POST /api/v1/trips/calculate (Pings, Milestones, Office)
     API->>Svc: calculateAndSave(evidence)
     Svc->>Clean: clean(rawPings)
-    Clean-->>Svc: Cleaned Pings (Duplicates, >50m Acc, >120km/h Teleports dropped)
+    Clean-->>Svc: Cleaned pings
     Svc->>Anchor: patchAndMerge(cleanedPings, evidence)
-    Anchor-->>Svc: Unified Timeline (Drops anchored in 22-min underpass gap; Office 400m verified)
+    Anchor-->>Svc: Unified timeline with anchors
     Svc->>Calc: calculate(unifiedPoints)
 
-    loop For each consecutive segment (P_i -> P_i+1)
-        alt Short Gap (< 70s) or Parked (< 5 km/h)
-            Calc->>Calc: Apply SHORT_GAP_AERIAL or PARKED (Haversine)
-        else Real Gap (>= 70s and >= 5 km/h)
+    loop Every consecutive segment
+        alt Short Gap or Parked
+            Calc->>Calc: Apply Haversine directly
+        else Real Gap
             Calc->>Route: getDrivingRoute(start, end)
-            alt Spatial Grid Cache Hit
-                Route-->>Calc: RouteResult(CACHE_HIT, distanceKm)
-            else Cache Miss & Provider Outage (Circuit Breaker OPEN)
-                Route-->>Calc: RouteResult(CIRCUIT_OPEN)
-                Calc->>Calc: Apply 1.4x Haversine Fallback (DEGRADED_CIRCUIT_OPEN)
+            alt Cache Hit
+                Route-->>Calc: RouteResult CACHE_HIT
+            else Circuit Breaker OPEN
+                Route-->>Calc: RouteResult CIRCUIT_OPEN
+                Calc->>Calc: Apply 1.4x Haversine Fallback
             end
         end
     end
 
-    Calc-->>Svc: TripDistanceResult (v1 = 28.80 km, status = DEGRADED)
-    Svc->>DB: INSERT INTO trips (v1, 28.80 km, DEGRADED) & trip_segments
-    Svc-->>API: 200 OK (v1 Invoice Created)
+    Calc-->>Svc: TripDistanceResult v1 (DEGRADED)
+    Svc->>DB: INSERT trips v1 and trip_segments
+    Svc-->>API: 200 OK (Invoice v1 Billed)
 
-    Note over Vendor,DB: Phase 2: Provider Recovers & Driver Phone Uploads Late Pings Post-Billing
-    Vendor->>API: POST /api/v1/trips/{tripId}/recompute (Late Pings + Reason)
-    API->>Svc: recomputeTrip(tripId, updatedEvidence, "LATE_PINGS_UPLOADED_AFTER_BILLING")
-    Svc->>DB: SELECT latest trip version (v1 = 28.80 km)
-    Svc->>Calc: Re-run 4-Stage Pipeline with Late Pings (Version 2)
+    Note over Vendor,DB: Phase 2: Provider Recovers & Late Pings Arrive
+    Vendor->>API: POST /api/v1/trips/{tripId}/recompute (Late Pings)
+    API->>Svc: recomputeTrip(tripId, updatedEvidence, reason)
+    Svc->>DB: SELECT latest trip version v1
+    Svc->>Calc: Recompute with late pings (Version 2)
     Calc->>Route: getDrivingRoute(start, end)
-    Route-->>Calc: RouteResult(SUCCESS, live road distance)
-    Calc-->>Svc: TripDistanceResult (v2 = 30.60 km, status = COMPLETED)
+    Route-->>Calc: RouteResult SUCCESS (Live road route)
+    Calc-->>Svc: TripDistanceResult v2 (COMPLETED)
 
-    Svc->>Svc: Compute RecomputeDelta: 30.60 - 28.80 = +1.80 km (CREDIT_NOTE)
-    Svc->>DB: INSERT INTO trips (v2, 30.60 km, COMPLETED) [v1 untouched!]
-    Svc->>DB: INSERT INTO trip_adjustments (+1.80 km, CREDIT_NOTE)
-    Svc-->>API: 200 OK (RecomputeResponse with Signed Delta +1.80 km)
+    Svc->>Svc: Compute signed delta (+1.80 km CREDIT_NOTE)
+    Svc->>DB: INSERT trips v2 (v1 untouched)
+    Svc->>DB: INSERT trip_adjustments (+1.80 km CREDIT_NOTE)
+    Svc-->>API: 200 OK (Signed Delta +1.80 km)
 ```
 
 ---
