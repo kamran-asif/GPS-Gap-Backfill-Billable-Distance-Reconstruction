@@ -5,23 +5,66 @@
 
 
 ## Table of Contents
-1. [Executive Summary & Core Design Principles](#1-executive-summary--core-design-principles)
-
-2. [End-to-End System Architecture & Hexagonal Boundary](#2-end-to-end-system-architecture--hexagonal-boundary)
-3. [Deep Dive: The 4-Stage Distance Rebuilding Algorithm](#3-deep-dive-the-4-stage-distance-rebuilding-algorithm)
-4. [Resilience, Spatial Caching & Rate-Limiting Architecture](#4-resilience-spatial-caching--rate-limiting-architecture)
-5. [Sequence Diagram: The Hardest Production Flow](#5-sequence-diagram-the-hardest-production-flow)
-6. [Database Schema & Multi-Tenant Entity-Relationship Design](#6-database-schema--multi-tenant-entity-relationship-design)
-7. [Failure-Mode, Mitigation & Recovery Matrix](#7-failure-mode-mitigation--recovery-matrix)
-8. [Algorithmic Complexity & 15-Million-Ping Benchmark Analysis](#8-algorithmic-complexity--15-million-ping-benchmark-analysis)
-9. [Deliberate Engineering Trade-offs](#9-deliberate-engineering-trade-offs)
-10. [Security, Multi-Tenancy & Zero-PII Architecture](#10-security-multi-tenancy--zero-pii-architecture)
-11. [Observability, Prometheus Metrics & Distributed Tracing](#11-observability-prometheus-metrics--distributed-tracing)
-12. [8-Layer Scalability & Growth Path (15M to 150M+ Pings)](#12-8-layer-scalability--growth-path-15m-to-150m-pings)
+1. [Pre-Implementation Architectural Decisions (Data Model, Components, APIs, Failure Modes)](#1-pre-implementation-architectural-decisions)
+2. [Executive Summary & Core Design Principles](#2-executive-summary--core-design-principles)
+3. [End-to-End System Architecture & Hexagonal Boundary](#3-end-to-end-system-architecture--hexagonal-boundary)
+4. [Deep Dive: The 4-Stage Distance Rebuilding Algorithm](#4-deep-dive-the-4-stage-distance-rebuilding-algorithm)
+5. [Resilience, Spatial Caching & Rate-Limiting Architecture](#5-resilience-spatial-caching--rate-limiting-architecture)
+6. [Sequence Diagram: The Hardest Production Flow](#6-sequence-diagram-the-hardest-production-flow)
+7. [Database Schema & Multi-Tenant Entity-Relationship Design](#7-database-schema--multi-tenant-entity-relationship-design)
+8. [Failure-Mode, Mitigation & Recovery Matrix](#8-failure-mode-mitigation--recovery-matrix)
+9. [Algorithmic Complexity & 15-Million-Ping Benchmark Analysis](#9-algorithmic-complexity--15-million-ping-benchmark-analysis)
+10. [Deliberate Engineering Trade-offs](#10-deliberate-engineering-trade-offs)
+11. [Security, Multi-Tenancy & Zero-PII Architecture](#11-security-multi-tenancy--zero-pii-architecture)
+12. [Observability, Prometheus Metrics & Distributed Tracing](#12-observability-prometheus-metrics--distributed-tracing)
+13. [8-Layer Scalability & Growth Path (15M to 150M+ Pings)](#13-8-layer-scalability--growth-path-15m-to-150m-pings)
 
 ---
 
-## 1. Executive Summary & Core Design Principles
+## 1. Pre-Implementation Architectural Decisions
+
+As mandated by enterprise design governance, all core data models, components, API contracts, and failure modes were formalized **prior to coding**:
+
+```
++-------------------------------------------------------------------------------------------------------------------+
+| PRE-IMPLEMENTATION DESIGN DECISION MATRIX                                                                         |
++---------------------+-------------------------------------------------------+-------------------------------------+
+| Dimension           | Architectural Formulation                             | Concrete System Specification       |
++---------------------+-------------------------------------------------------+-------------------------------------+
+| 1. DATA MODEL       | - Immutable Domain Value Objects                      | `Coordinate`, `GpsPing`,            |
+|                     | - Versioned Entity Append-Only Ledger                 | `AnchorPoint`, `SegmentResult`,     |
+|                     | - Signed Delta Financial Adjustments                  | `TripEvidence`, `TripEntity`,       |
+|                     | - Encapsulated Raw Evidence Blob Snapshot             | `TripSegmentEntity`,                |
+|                     |                                                       | `TripAdjustmentEntity`              |
++---------------------+-------------------------------------------------------+-------------------------------------+
+| 2. MAIN COMPONENTS  | - Stage I: Stream Cleaning (Dedupe, Order, Noise)     | `StreamCleaner`                     |
+|                     | - Stage II: Gap Patching (Business Milestones)        | `AnchorPatchEngine`                 |
+|                     | - Stage III: Segment Evaluation & Cheap Fallback      | `SegmentCalculatorEngine`           |
+|                     | - Routing Layer: Snapped Grid Cache (~11m Caffeine)   | `RoutingCache`                      |
+|                     | - Resilience: 10-Sample Ring Buffer Circuit Breaker   | `RoutingCircuitBreaker`             |
+|                     | - Scaling: Token-Bucket Rate Limiter & Batch Chunks   | `RoutingRateLimiter`,               |
+|                     |                                                       | `ParallelTripProcessor`             |
++---------------------+-------------------------------------------------------+-------------------------------------+
+| 3. APIS             | - Ingest & Calculate Initial Distance (v1)            | `POST /api/v1/trips/calculate`      |
+|                     | - Parallel Multi-Worker Batch Calculation             | `POST /api/v1/trips/batch-calculate`|
+|                     | - Idempotent Recompute with Signed Delta (Credit/Debit| `POST /api/v1/trips/{id}/recompute` |
+|                     | - Fetch Explainable Trip Audit Trail by Version       | `GET  /api/v1/trips/{id}?version=V` |
+|                     | - Fetch Signed Billing Adjustments Ledger             | `GET  /api/v1/trips/{id}/adjustments|
+|                     | - Auto-Heal Degraded Outage Trips                     | `POST /api/v1/admin/reconcile-degrad|
+|                     | - Inspect & Trip/Reset Circuit Breaker                | `GET/POST /api/v1/admin/circuit-brea|
++---------------------+-------------------------------------------------------+-------------------------------------+
+| 4. FAILURE MODES    | - Teleport Jumps (>120 km/h burst rejection)          | Evaluated against `lastAccepted`    |
+|                     | - Low GPS Accuracy (>50m dilution dropped)            | Dropped during Stream Cleaning      |
+|                     | - 22-min Underpass/Tunnel Blackout                    | Anchored via Pickups/Drops/Office   |
+|                     | - 3 AM Maps Provider Outage (503 / Timeout)           | 1.4x Haversine Fallback (DEGRADED)  |
+|                     | - Driver Late Pings Uploaded After Invoice Closed     | Signed Delta (+X.XX km CREDIT_NOTE) |
+|                     | - Cross-Tenant Data Leakage                           | TenantFilter + TenantContext barrier|
++---------------------+-------------------------------------------------------+-------------------------------------+
+```
+
+---
+
+## 2. Executive Summary & Core Design Principles
 
 Vendors providing enterprise commuter cabs to MoveInSync are compensated strictly per kilometer (`$/km`). Raw trip distances originate from hardware GPS trackers and driver smartphones operating in hostile urban environments (underpasses, high-rise urban canyons, underground basement parking, battery savers, and delayed batch uploads).
 
