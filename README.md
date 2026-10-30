@@ -11,21 +11,37 @@
 ---
 
 ## Table of Contents
-1. [Problem Statement & Business Motivation](#1-problem-statement--business-motivation)
-2. [Core Engineering Guarantees](#2-core-engineering-guarantees)
-3. [Repository & Package Architecture](#3-repository--package-architecture)
-4. [The 4-Stage Distance Rebuilding Pipeline](#4-the-4-stage-distance-rebuilding-pipeline)
-5. [Billing Model, Versioning & Signed Adjustments](#5-billing-model-versioning--signed-adjustments)
-6. [Quickstart & Running the Engine](#6-quickstart--running-the-engine)
-7. [Complete REST API Reference & Live Commands](#7-complete-rest-api-reference--live-commands)
-8. [Manual Database & Billing Verification (H2 Console)](#8-manual-database--billing-verification-h2-console)
-9. [Benchmark & Scale Performance (15 Million Pings)](#9-benchmark--scale-performance-15-million-pings)
-10. [Automated Verification & Test Matrix](#10-automated-verification--test-matrix)
-11. [Configuration Reference](#11-configuration-reference)
+1. [Core Requirements Quick-Reference](#1-core-requirements-quick-reference-how-to-run-assumptions-benchmarks-trade-offs)
+2. [Problem Statement & Business Motivation](#2-problem-statement--business-motivation)
+3. [Core Engineering Guarantees](#3-core-engineering-guarantees)
+4. [Repository & Package Architecture](#4-repository--package-architecture)
+5. [The 4-Stage Distance Rebuilding Pipeline](#5-the-4-stage-distance-rebuilding-pipeline)
+6. [Billing Model, Versioning & Signed Adjustments](#6-billing-model-versioning--signed-adjustments)
+7. [Quickstart & How to Run](#7-quickstart--how-to-run)
+8. [Complete REST API Reference & Live Commands](#8-complete-rest-api-reference--live-commands)
+9. [Manual Database & Billing Verification (H2 Console)](#9-manual-database--billing-verification-h2-console)
+10. [Benchmark & Scale Performance (15 Million Pings)](#10-benchmark--scale-performance-15-million-pings)
+11. [Design Assumptions](#11-design-assumptions)
+12. [Architectural Trade-offs](#12-architectural-trade-offs)
+13. [Automated Verification & Test Matrix](#13-automated-verification--test-matrix)
+14. [Configuration Reference](#14-configuration-reference)
 
 ---
 
-## 1. Problem Statement & Business Motivation
+## 1. Core Requirements Quick-Reference (How to Run, Assumptions, Benchmarks, Trade-offs)
+
+For rapid evaluation against case-study criteria:
+
+| Requirement | Implementation Summary | Quick Link |
+| :--- | :--- | :--- |
+| **How to Run** | Local (`mvn spring-boot:run` on port 8080) with pre-seeded billing data in H2 Console, or containerized (`docker compose up --build` with PostgreSQL 16). | [Section 7: Quickstart](#7-quickstart--how-to-run) |
+| **Assumptions** | Urban cab speed cap ($120$ km/h), GPS noise ceiling ($50$m), short-gap cutoff ($70$s), office perimeter ($400$m), WGS84 geodesic curvature, external Maps API QPS limits. | [Section 11: Assumptions](#11-design-assumptions) |
+| **Benchmark Results** | **15,000,000 pings (10,000 trips)** in **19.65s** $\to$ **763,242 pings/sec**, p50: $1.78$ms, p99: $4.41$ms, heap delta: **2.27 MB**. | [Section 10: Benchmark](#10-benchmark--scale-performance-15-million-pings) |
+| **Trade-offs** | Availability over immediate consistency ($1.4\times$ fallback vs blocking fleet); append-only versioning vs in-place row mutation; spatial grid snapping (~11m) vs exact coordinates. | [Section 12: Trade-offs](#12-architectural-trade-offs) |
+
+---
+
+## 2. Problem Statement & Business Motivation
 
 Vendors who supply corporate commuter cabs to MoveInSync are compensated strictly per kilometer (`$/km`). Raw trip distances originate from in-cab GPS hardware trackers and driver smartphones operating in hostile urban environments. Naive distance calculation fails in four critical ways:
 
@@ -471,7 +487,40 @@ Memory Delta (Heap)         : 2.27 MB
 
 ---
 
-## 10. Automated Verification & Test Matrix
+## 11. Design Assumptions
+
+The distance rebuilding engine operates under explicit domain and infrastructure assumptions:
+
+1. **Urban Transport Velocity Bounds**:
+   - The maximum physically plausible speed for a commuter cab in an urban/suburban corridor is assumed to be **$120.0$ km/h**. Any instantaneous implied aerial velocity above this threshold between consecutive valid fixes is classified as an un-drivable multipath teleport jump.
+2. **GPS Accuracy Thresholds**:
+   - Commercial smartphone and OBD tracker GPS fixes with an estimated horizontal dilution/accuracy radius $> 50.0$ meters are treated as degraded noise (e.g. reflections in high-rise canyons or basements) and dropped prior to distance accumulation.
+3. **Short-Gap Straight-Line Linearity ($< 70$s)**:
+   - For consecutive GPS fixes under 70 seconds apart at normal speeds ($\le 120$ km/h), the difference between road-network driving distance and WGS84 geodesic straight-line distance is mathematically negligible ($< 0.1\%$). Calling third-party routing APIs for these micro-segments is assumed to be an unnecessary latency and billing overhead.
+4. **Office Campus Perimeter ($400$m)**:
+   - Corporate tech parks (e.g., Ecospace, Manyata) span hundreds of meters from entrance gates to interior drop-off zones. An actual trip-end fix within 400 meters of the planned office pin is assumed to be a valid drop at an internal building; beyond 400 meters, it is assumed the driver failed to end the trip at the campus gate.
+5. **No-Show Compensation**:
+   - Cabs that arrive at an employee pickup location where the rider is marked `NO_SHOW` must still be compensated for the deadhead mileage driven to the planned stop.
+6. **Provider Availability & Tortuosity Factor**:
+   - External road routing APIs (Google Maps, OSRM) can experience rate-limiting spikes or 3 AM outages. During outages, the ratio of actual road distance to straight-line aerial distance in urban road grids is empirically assumed to be **$1.4\times$** (road tortuosity multiplier).
+7. **Append-Only Accounting**:
+   - Financial systems require that once an invoice version $v_k$ is issued, it must never be mutated in place. Any post-billing adjustments must produce version $v_{k+1}$ with a signed adjustment note.
+
+---
+
+## 12. Architectural Trade-offs
+
+| Decision | Chosen Approach | Alternative Considered | Trade-off Rationale |
+| :--- | :--- | :--- | :--- |
+| **1. Resilience (PACELC)** | **Availability & Explicit Degradation** ($1.4\times$ fallback, trip marked `DEGRADED`) | **Strict Consistency** (Block trip completion with `HTTP 503` until Maps API recovers) | Blocking thousands of shift-change cabs at 3 AM freezes enterprise operations. Providing an immediate transparent fallback and auto-reconciling later restores eventual consistency without blocking operations. |
+| **2. Audit Ledger** | **Append-Only Versioning** (`v1 \to v2 \to v3` + `trip_adjustments` signed delta) | **In-Place Mutation** (`UPDATE trips SET total_distance_km = ...`) | While in-place mutation saves database rows, silently altering a billed invoice triggers accounting audit failures and vendor disputes. Disk storage is cheap; financial auditability is mandatory. |
+| **3. Spatial Caching** | **4-Decimal Grid Snapping** ($0.0001^\circ \approx 11.1$m resolution Caffeine cache) | **Exact Coordinate Caching** (Full 6-decimal floating-point keys) | Vehicle GPS fixes exhibit 5m–15m jitter, yielding a ~0% cache hit rate with exact coordinates. Snapping to an ~11m box yields **90%–99% cache hits** across repeated office commuter corridors with negligible quantization error ($< 0.01$ km). |
+| **4. Database Pool Protection** | **Narrow Write Transactions** via `TransactionTemplate` (CPU & Routing I/O executed *outside* DB tx) | **Broad Method-Level `@Transactional`** across the whole calculation pipeline | Holding HikariCP database connections during 200–500ms external HTTP routing calls quickly causes connection pool starvation. Narrow transactions hold DB locks only for the $\sim 2$ms write phase. |
+| **5. Core Portability** | **Hexagonal Pure-Java Engine** (Zero Spring / JPA annotations in domain/engine) | **Framework-Coupled Entities** (Domain models carrying JPA/Hibernate annotations) | A pure-Java core allows running 15M-ping benchmarks and mathematical unit tests in milliseconds without launching the Spring ApplicationContext. |
+
+---
+
+## 13. Automated Verification & Test Matrix
 
 Run the entire test suite (14 test classes covering unit, property, concurrency, multi-tenant security, fault-injection, and 15M-ping scale tests):
 
