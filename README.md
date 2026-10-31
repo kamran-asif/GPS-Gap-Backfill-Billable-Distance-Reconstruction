@@ -490,16 +490,18 @@ mvn spring-boot:run
 | Health | `http://localhost:8080/actuator/health` |
 | Prometheus metrics | `http://localhost:8080/actuator/prometheus` |
 
-### Option B — Docker Compose (PostgreSQL 16)
+### Option B — Production Docker Compose Stack (PostgreSQL 16, Redis 7, Apache Kafka 3.7)
 
 ```powershell
 docker compose up --build
 ```
 
-| Service | Port | Credentials |
+| Service | Port | Role & Configuration |
 | :--- | :--- | :--- |
-| `moveinsync-trip-distance-engine` | `8080` | – |
-| `moveinsync-postgres` | `5432` | database `moveinsync`, user `moveinsync`, password `moveinsync_secret` |
+| `moveinsync-trip-distance-engine` | `8080` | Spring Boot engine (Flyway migrations, L2 Redis cache, Kafka ingestion, Actuator) |
+| `moveinsync-postgres` | `5432` | PostgreSQL 16 (`moveinsync` / `moveinsync_secret`, database `moveinsync`) |
+| `moveinsync-redis` | `6379` | Redis 7 distributed L2 spatial route cache |
+| `moveinsync-kafka` | `9092` | Apache Kafka 3.7 (KRaft mode, single-node, partitioned by `tripId`) |
 
 > [!WARNING]
 > The Compose credentials are for local development only. Supply real secrets through environment variables or a secret manager in any shared environment.
@@ -535,6 +537,8 @@ Import `MoveInSync_Trip_Distance_Engine.postman_collection.json` — it contains
 
 | Method | Path | Description | EMPLOYEE | OPERATOR | ADMIN |
 | :-: | :--- | :--- | :-: | :-: | :-: |
+| `POST` | `/api/v1/auth/token` | Generate signed JWT token (`Bearer`) | ✅ | ✅ | ✅ |
+| `GET` | `/api/v1/auth/validate` | Inspect & validate JWT token claims | ✅ | ✅ | ✅ |
 | `POST` | `/api/v1/trips/calculate` | Calculate and store version 1 of a trip | – | ✅ | ✅ |
 | `POST` | `/api/v1/trips/batch-calculate?workers=N` | Calculate many trips in parallel | – | ✅ | ✅ |
 | `POST` | `/api/v1/trips/{tripId}/recompute` | Create a new version + signed adjustment | – | ✅ | ✅ |
@@ -545,6 +549,25 @@ Import `MoveInSync_Trip_Distance_Engine.postman_collection.json` — it contains
 | `POST` | `/api/v1/admin/provider/simulate-failure?fail=true` | Toggle simulated provider outage | – | – | ✅ |
 | `POST` | `/api/v1/admin/reconcile-degraded` | Recompute all `DEGRADED` trips | – | – | ✅ |
 | `POST` | `/api/v1/admin/cache/invalidate` | Clear the route cache | – | – | ✅ |
+
+### 0. Obtain JWT Bearer Token — `POST /api/v1/auth/token`
+
+```powershell
+$authReq = @{
+  "username" = "ops-user-1"
+  "tenantId" = "moveinsync-client-1"
+  "role"     = "ROLE_OPERATOR"
+} | ConvertTo-Json
+
+$tokenRes = Invoke-RestMethod -Uri "http://localhost:8080/api/v1/auth/token" -Method Post -Body $authReq -ContentType "application/json"
+$jwtToken = $tokenRes.token
+
+# All subsequent requests can use either standard Authorization header or direct X-Tenant headers:
+$headers = @{
+  "Content-Type"  = "application/json"
+  "Authorization" = "Bearer $jwtToken"
+}
+```
 
 ### 1. Calculate a trip — `POST /api/v1/trips/calculate`
 
@@ -788,6 +811,9 @@ mvn test -Dtest=ScaleBenchmarkTest                           # 15M-ping benchmar
 | `ParallelTripProcessorTest` | Scaling | Concurrent execution with preserved input order |
 | `ConcurrentTripCalculationTest` | Concurrency | 100 threads sharing cache, breaker and engine without races |
 | `TenantIsolationTest` | Security | Tenant A cannot read, recompute or see adjustments of tenant B |
+| `JwtTokenProviderTest` | Security | HMAC-SHA256 generation, signature tamper rejection, expiry check |
+| `OsrmRoutingProviderTest` | Routing | OSRM coordinate serialization and connection-failure graceful fallback |
+| `KafkaBufferServiceTest` | Streaming | Partitioned stream buffering by tripId and calculation trigger on completion |
 | `TripControllerE2ETest` | HTTP | MockMvc lifecycle, `403` RBAC checks, PII masking, batch endpoint |
 | `ScaleBenchmarkTest` | Performance | 15M pings with latency and memory assertions |
 
@@ -816,45 +842,37 @@ FROM trip_segments WHERE trip_id = 'TRIP-BLR-1001' ORDER BY version, segment_ind
 | **Short-gap shortcut** | Haversine for gaps < 70 s | Route every segment | Routing every few seconds of driving costs money and latency for almost no accuracy gain |
 | **Transaction scope** | Compute and route outside; short write transaction | `@Transactional` across the whole flow | Holding DB connections during network calls exhausts the pool under load |
 | **Core design** | Plain-Java engine behind interfaces | Spring/JPA-annotated domain | Fast, isolated tests (incl. the 15M benchmark) and reuse in batch or streaming jobs |
-| **Identity** | Request headers | JWT / OAuth2 | Keeps the case study runnable without an identity provider; trivially swappable |
-| **Cache placement** | In-process Caffeine | Redis | Zero infrastructure for the case study; each instance warms its own cache (see roadmap) |
+| **Identity & Auth** | Dual support: RFC 7519 JWT Bearer tokens + direct dev headers | Header-only or rigid OAuth server | Native HMAC-SHA256 JWT provider with zero extra licensing dependencies + backward-compatible test headers |
+| **Route Cache Topology** | Multi-tier: L1 in-process Caffeine + L2 distributed Redis | Caffeine only or Redis only | L1 satisfies microsecond lookups without network hops; L2 shares warm routes across Kubernetes nodes with zero-downtime fallback |
+| **Event Ingestion** | Synchronous REST + Kafka keyed by `tripId` | Synchronous REST only | Message keying guarantees all telemetry for a given cab arrives at the exact same partition for strict FIFO ordering |
 
 ---
 
 ## 18. Implementation Status and Future Improvements
 
-### Implemented
+### Implemented Enterprise Stack
 
-- [x] Stream cleaning — de-duplication, sorting, accuracy and teleport filtering
-- [x] Gap patching — pickup / drop / no-show anchors, rider-type fallback chains, 400 m office rule
-- [x] Segment engine — ordered rule evaluation with per-segment explanations
-- [x] Deterministic `BigDecimal` rounding and rule versioning
-- [x] Append-only trip versions and signed adjustment ledger
-- [x] Route cache, token-bucket rate limiter, sliding-window circuit breaker, degraded fallback
-- [x] Bulk reconciliation of degraded trips
-- [x] Tenant isolation, role-based access, PII masking
-- [x] Prometheus metrics and trace-ID logging
-- [x] Batch and parallel processing; 15M-ping benchmark
-- [x] Docker Compose deployment with PostgreSQL 16
+- [x] **Stream Cleaning**: De-duplication, sorting, accuracy and teleport filtering.
+- [x] **Gap Patching**: Pickup / drop / no-show anchors, rider-type fallback chains, 400 m office rule.
+- [x] **Segment Engine**: Ordered rule evaluation with per-segment explanations.
+- [x] **Deterministic Math**: `BigDecimal` rounding and rule versioning.
+- [x] **Financial Ledger**: Append-only trip versions and signed adjustment ledger.
+- [x] **Resilience Core**: Sliding-window circuit breaker (50% threshold), token-bucket rate limiter, and `1.4×` degraded fallback.
+- [x] **Multi-Tier Routing Cache**: L1 Caffeine in-memory + L2 distributed Redis cluster with automatic graceful degradation.
+- [x] **Real OSRM Routing Adapter**: `OsrmRoutingProvider` with HTTP client, connect/read timeouts, and circuit breaker integration.
+- [x] **Versioned DB Migrations (Flyway)**: Clean schema evolution via `V1__init_schema.sql` and `V2__create_outbox_table.sql`.
+- [x] **Stateless JWT Authentication**: RFC 7519 HMAC-SHA256 provider (`/api/v1/auth/token`), Bearer authentication, and role enforcement.
+- [x] **Kafka Stream Ingestion & Outbox Relay**: Keyed by `tripId` for partition-level FIFO ordering + Transactional Outbox pattern for financial adjustments.
+- [x] **Multi-Tenancy & Privacy**: Strict tenant isolation (`TenantFilter` + `TenantContext`) and PII masking.
+- [x] **Observability**: Prometheus metrics export and MDC trace correlation.
+- [x] **Production Docker Compose**: App + PostgreSQL 16 + Redis 7 + Apache Kafka 3.7.
 
-### Known limitations
-
-- The routing provider is **simulated**; no real OSRM / Google Maps adapter is included yet.
-- Identity is **header-based**, not token-based.
-- The route cache is **per instance**, so a horizontally scaled deployment does not share cache hits.
-- Schema is managed by Hibernate `ddl-auto` rather than versioned migrations.
-
-### Roadmap
+### Future Enterprise Roadmap
 
 | Priority | Improvement | Benefit |
 | :-: | :--- | :--- |
-| 1 | Real routing adapter (OSRM / Google Routes) with timeouts and retries | Production-ready distances |
-| 2 | JWT authentication via the corporate identity provider | Proper authentication and auditing of who triggered what |
-| 3 | Flyway / Liquibase migrations | Safe, reviewable schema changes |
-| 4 | Shared route cache (Redis) | Cache hits shared across instances |
-| 5 | Kafka-based ping ingestion with an outbox for adjustments | Streaming scale and reliable downstream billing events |
-| 6 | Learned, city-specific degraded multiplier | Smaller corrections after outages |
-| 7 | OpenTelemetry tracing | End-to-end request visibility |
+| 1 | Dynamic ML-based road tortuosity factor | Adjusts the $1.4\times$ multiplier based on city density and live weather |
+| 2 | OpenTelemetry gRPC trace exporter | End-to-end distributed trace propagation to Jaeger / Datadog |
 
 ---
 

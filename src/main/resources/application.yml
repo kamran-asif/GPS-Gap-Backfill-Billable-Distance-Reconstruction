@@ -25,6 +25,30 @@ spring:
       enabled: true
       path: /h2-console
 
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      timeout: 500ms
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: moveinsync-trip-distance-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.moveinsync.distance.*"
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
   jackson:
     serialization:
       write-dates-as-timestamps: false
@@ -51,8 +75,23 @@ logging:
 
 engine:
   routing:
+    provider-type: ${ENGINE_ROUTING_PROVIDER:simulated} # simulated | osrm
+    osrm:
+      base-url: ${OSRM_BASE_URL:http://router.project-osrm.org}
+      timeout-ms: 1500
+    redis-cache:
+      enabled: ${ENGINE_REDIS_ENABLED:false} # true in production / docker
     rate-limit:
       # Client-side token bucket guarding outbound routing provider calls (Scaling Level 7).
       # 0 permits/second disables the limiter (default, single-instance behaviour).
       permits-per-second: 0
       burst: 0
+  jwt:
+    secret: ${JWT_SECRET:MoveInSyncEnterpriseSecretKeyForBillingEngine2026!}
+    expiration-ms: 86400000 # 24 hours
+  kafka:
+    enabled: ${ENGINE_KAFKA_ENABLED:false} # true when Kafka cluster is present
+    topics:
+      gps-pings: trip-gps-pings
+      adjustments: trip-adjustments
+      milestones: trip-milestones

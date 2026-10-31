@@ -18,21 +18,33 @@ public final class RoutingCache {
     private static final Duration DEFAULT_TTL = Duration.ofHours(24);
 
     private final int gridPrecision;
+    private final Duration ttl;
     private final Cache<String, RouteResult> cache;
+    private final RedisRouteStorage redisStorage;
     private final AtomicLong hitCount = new AtomicLong(0);
     private final AtomicLong missCount = new AtomicLong(0);
 
-    public RoutingCache(int gridPrecision, int maxSize, Duration ttl) {
+    public RoutingCache(int gridPrecision, int maxSize, Duration ttl, RedisRouteStorage redisStorage) {
         this.gridPrecision = gridPrecision;
+        this.ttl = ttl != null ? ttl : DEFAULT_TTL;
+        this.redisStorage = redisStorage;
         this.cache = Caffeine.newBuilder()
                 .maximumSize(maxSize > 0 ? maxSize : DEFAULT_MAX_SIZE)
-                .expireAfterWrite(ttl != null ? ttl : DEFAULT_TTL)
+                .expireAfterWrite(this.ttl)
                 .recordStats()
                 .build();
     }
 
+    public RoutingCache(int gridPrecision, int maxSize, Duration ttl) {
+        this(gridPrecision, maxSize, ttl, null);
+    }
+
     public static RoutingCache createDefault(int gridPrecision) {
-        return new RoutingCache(gridPrecision, DEFAULT_MAX_SIZE, DEFAULT_TTL);
+        return new RoutingCache(gridPrecision, DEFAULT_MAX_SIZE, DEFAULT_TTL, null);
+    }
+
+    public static RoutingCache createWithRedis(int gridPrecision, RedisRouteStorage redisStorage) {
+        return new RoutingCache(gridPrecision, DEFAULT_MAX_SIZE, DEFAULT_TTL, redisStorage);
     }
 
     public String generateKey(Coordinate start, Coordinate end) {
@@ -43,11 +55,23 @@ public final class RoutingCache {
 
     public RouteResult get(Coordinate start, Coordinate end) {
         String key = generateKey(start, end);
+        // 1. Check L1 In-Memory Cache (Caffeine)
         RouteResult result = cache.getIfPresent(key);
         if (result != null) {
             hitCount.incrementAndGet();
             return RouteResult.cacheHit(result.getDistanceKm(), result.getDurationSeconds());
         }
+
+        // 2. Check L2 Distributed Cache (Redis)
+        if (redisStorage != null) {
+            RouteResult redisResult = redisStorage.get(key);
+            if (redisResult != null) {
+                cache.put(key, redisResult); // Warm L1 cache
+                hitCount.incrementAndGet();
+                return RouteResult.cacheHit(redisResult.getDistanceKm(), redisResult.getDurationSeconds());
+            }
+        }
+
         missCount.incrementAndGet();
         return null;
     }
@@ -56,6 +80,9 @@ public final class RoutingCache {
         if (result != null && result.isSuccess()) {
             String key = generateKey(start, end);
             cache.put(key, result);
+            if (redisStorage != null) {
+                redisStorage.put(key, result, ttl);
+            }
         }
     }
 
@@ -73,6 +100,9 @@ public final class RoutingCache {
 
     public void invalidateAll() {
         cache.invalidateAll();
+        if (redisStorage != null) {
+            redisStorage.invalidateAll();
+        }
         hitCount.set(0);
         missCount.set(0);
     }

@@ -24,7 +24,7 @@ import java.time.Instant;
 import java.util.*;
 
 @Service
-public class TripDistanceService {
+public class TripDistanceService implements TripCalculationExecutor {
     private static final Logger log = LoggerFactory.getLogger(TripDistanceService.class);
 
     private final TripRepository tripRepository;
@@ -34,6 +34,9 @@ public class TripDistanceService {
     private final EngineMetrics metrics;
     private final TransactionTemplate writeTx;
     private final TransactionTemplate readTx;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.moveinsync.distance.kafka.OutboxRelayService outboxRelayService;
 
     public TripDistanceService(TripRepository tripRepository,
                                TripAdjustmentRepository adjustmentRepository,
@@ -227,6 +230,15 @@ public class TripDistanceService {
             adjustmentEntity.setCreatedAt(delta.getCreatedAt());
 
             adjustmentRepository.save(adjustmentEntity);
+
+            if (outboxRelayService != null) {
+                outboxRelayService.recordAdjustmentEvent(new com.moveinsync.distance.kafka.TripEvents.AdjustmentEvent(
+                        tripId, tenantId, delta.getPreviousVersion(), delta.getNewVersion(),
+                        delta.getPreviousDistanceKm(), delta.getNewDistanceKm(), delta.getDeltaKm(),
+                        delta.getFormattedDelta(), delta.getAdjustmentType().name(), delta.getReason(),
+                        delta.getCreatedAt()
+                ));
+            }
         });
 
         RecomputeDelta delta = recomputeResult.getDelta();

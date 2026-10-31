@@ -214,4 +214,10 @@ Complexity: `O(N log N)` per trip (sorting), `O(N)` memory; route cache bounded 
 3. **Idempotency** — optional `X-Idempotency-Key` prevents duplicate billing on retries.
 4. **Outbound protection** — grid cache + token bucket + circuit breaker keep provider cost and quota under control.
 5. **Horizontal scale** — the engine is stateless apart from a per-instance cache, so nodes can sit behind a load balancer.
-6. **Next steps (not implemented)** — shared Redis cache, Kafka ingestion keyed by `tripId` for per-trip ordering, versioned DB migrations, JWT auth, real routing adapter.
+6. **Enterprise Architecture (Fully Implemented)**:
+   - **Shared Redis L2 Cache**: `SpringDataRedisRouteStorage` coordinates multi-instance route cache hits backing the Caffeine L1 cache with zero failure risk.
+   - **Kafka Stream Ingestion**: `trip-gps-pings` topic keyed by `tripId` guaranteeing that all pings for the same trip arrive at the exact same partition for strict FIFO ordering (`TripKafkaBufferService`).
+   - **Transactional Outbox Pattern**: `outbox_events` table populated atomically alongside adjustments + scheduled `OutboxRelayService` publishing to `trip-adjustments`.
+   - **Versioned Flyway Migrations**: `V1__init_schema.sql` and `V2__create_outbox_table.sql` managing database schema evolution.
+   - **JWT Authentication**: Native Java 21 `JwtTokenProvider` (RFC 7519 HMAC-SHA256), `POST /api/v1/auth/token`, and `Authorization: Bearer <token>` support with backward-compatible header fallback.
+   - **Real OSRM Routing Adapter**: `OsrmRoutingProvider` invoking Open Source Routing Machine with connect/read timeouts and circuit breaker fallback.

@@ -26,26 +26,55 @@ public class TenantFilter extends OncePerRequestFilter {
     public static final String HEADER_USER_ID = "X-User-ID";
     public static final String DEFAULT_TENANT_ID = "moveinsync-client-default";
 
+    private final JwtTokenProvider jwtTokenProvider;
+
+    public TenantFilter(JwtTokenProvider jwtTokenProvider) {
+        this.jwtTokenProvider = jwtTokenProvider;
+    }
+
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        String tenantId = request.getHeader(HEADER_TENANT_ID);
-        if (tenantId == null || tenantId.trim().isEmpty()) {
-            tenantId = DEFAULT_TENANT_ID;
+        String tenantId = null;
+        String userRole = null;
+        String userId = null;
+
+        // 1. Check for standard Authorization: Bearer <jwt> header
+        String authHeader = request.getHeader("Authorization");
+        if (authHeader != null && authHeader.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            String token = authHeader.substring(7).trim();
+            JwtTokenProvider.JwtClaims claims = jwtTokenProvider.validateAndParseToken(token);
+            if (claims != null) {
+                tenantId = claims.tenantId();
+                userRole = claims.role();
+                userId = claims.subject();
+            }
         }
 
-        String userRole = request.getHeader(HEADER_USER_ROLE);
+        // 2. Fall back to direct multi-tenant simulation headers if JWT absent or omitted
+        if (tenantId == null || tenantId.trim().isEmpty()) {
+            tenantId = request.getHeader(HEADER_TENANT_ID);
+            if (tenantId == null || tenantId.trim().isEmpty()) {
+                tenantId = DEFAULT_TENANT_ID;
+            }
+        }
+
         if (userRole == null || userRole.trim().isEmpty()) {
-            userRole = "ROLE_OPERATOR";
+            userRole = request.getHeader(HEADER_USER_ROLE);
+            if (userRole == null || userRole.trim().isEmpty()) {
+                userRole = "ROLE_OPERATOR";
+            }
         }
         if (!userRole.startsWith("ROLE_")) {
             userRole = "ROLE_" + userRole;
         }
 
-        String userId = request.getHeader(HEADER_USER_ID);
         if (userId == null || userId.trim().isEmpty()) {
-            userId = "system-user";
+            userId = request.getHeader(HEADER_USER_ID);
+            if (userId == null || userId.trim().isEmpty()) {
+                userId = "system-user";
+            }
         }
 
         String traceId = UUID.randomUUID().toString().substring(0, 8);
