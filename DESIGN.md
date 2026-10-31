@@ -1,198 +1,217 @@
-# System Architecture & Technical Design Document
-## MoveInSync Billing-Grade GPS Trip Distance Rebuilding Engine
+# Design Note — Trip Distance Rebuilding Engine
+
+> Data model, main components, APIs and failure modes were decided **before implementation**. This note records those decisions and why they were made. For run instructions and API examples, see [README.md](README.md).
 
 ---
 
-## 1. Pre-Implementation Architectural Decisions
+## 1. Decisions Made Before Coding
 
-As mandated by design governance, the core data model, components, APIs, and failure modes were finalized **prior to coding**:
-
-| Dimension | Architectural Choice | System Component / Implementation |
+| Dimension | Decision | Implemented by |
 | :--- | :--- | :--- |
-| **1. Data Model** | Immutable value objects & versioned append-only audit ledger with signed adjustments | `Coordinate`, `GpsPing`, `AnchorPoint`, `SegmentResult`, `TripEvidence`, `TripEntity`, `TripSegmentEntity`, `TripAdjustmentEntity` |
-| **2. Main Components** | Pure-Java 4-stage pipeline decoupled from Spring/JPA framework | `StreamCleaner` (Stage I), `AnchorPatchEngine` (Stage II), `SegmentCalculatorEngine` (Stage III), `RoutingCache` (~11m Caffeine grid), `RoutingCircuitBreaker`, `RoutingRateLimiter` |
-| **3. APIs** | REST API with multi-tenant RBAC and idempotency protection | `POST /calculate` (v1 distance), `POST /recompute` (signed delta), `POST /batch-calculate` (parallel), `GET /{id}` (audit trail), `GET /adjustments` (credit/debit ledger), `POST /admin/reconcile-degraded` |
-| **4. Failure Modes** | Fault-tolerant graceful degradation and deterministic recovery | Teleport speed filter (`>120 km/h` vs `lastAccepted`), Accuracy drop (`>50m`), Underpass milestone anchoring, Maps outage `1.4x` fallback (`DEGRADED`), Post-billing signed credit/debit notes |
+| **Data model** | Immutable domain value objects; append-only trip versions; separate signed-adjustment ledger | `Coordinate`, `GpsPing`, `AnchorPoint`, `SegmentResult`, `TripEvidence` · `TripEntity`, `TripSegmentEntity`, `TripAdjustmentEntity` |
+| **Main components** | Plain-Java 3-stage engine (no Spring/JPA) + a routing layer behind an interface | `StreamCleaner`, `AnchorPatchEngine`, `SegmentCalculatorEngine` · `RoutingService`, `RoutingCache`, `RoutingRateLimiter`, `RoutingCircuitBreaker` |
+| **APIs** | Tenant-scoped REST with role-based access and optional idempotency key | `POST /calculate`, `POST /batch-calculate`, `POST /{tripId}/recompute`, `GET /{tripId}`, `GET /{tripId}/adjustments`, `POST /admin/reconcile-degraded` |
+| **Failure modes** | Degrade visibly instead of failing; correct later via signed adjustments | Accuracy and teleport filters, milestone anchoring, `1.4×` fallback with `DEGRADED` status, versioned recompute |
 
 ---
 
-## 2. End-to-End System Architecture
+## 2. Architecture
 
 ```mermaid
 flowchart TD
-    Client["Cab App / Billing Client"] -->|HTTPS + Tenant & RBAC| Gateway["Spring Security + TenantFilter"]
-    Gateway --> TripCtrl["TripController & AdminController"]
-    TripCtrl --> TripSvc["TripDistanceService"]
+    Client["Cab app / billing client"] -->|"HTTPS + tenant and role headers"| Gateway["Spring Security + TenantFilter"]
+    Gateway --> Ctrl["TripController / AdminController"]
+    Ctrl --> Svc["TripDistanceService"]
 
-    subgraph PureJavaCore ["Pure Java Core Engine (Zero Framework Dependencies)"]
+    subgraph Core["Distance engine - plain Java"]
         direction TB
-        Stage1["Stage I: StreamCleaner<br/>Deduplicate, TimSort, Acc <= 50m, Speed <= 120 km/h"]
-        Stage2["Stage II: AnchorPatchEngine<br/>Milestone Anchors, No-Show, Office 400m"]
-        Stage3["Stage III: SegmentCalculatorEngine<br/>Short Gap < 70s, Parked < 5 km/h, Routed"]
-        Stage4["Stage IV: RecomputeDelta<br/>Append-Only Versioning & Signed Credit/Debit Note"]
-        Stage1 --> Stage2 --> Stage3 --> Stage4
+        S1["Stage 1: StreamCleaner - dedupe, sort, accuracy <= 50 m, speed <= 120 km/h"]
+        S2["Stage 2: AnchorPatchEngine - milestones, no-show, office 400 m"]
+        S3["Stage 3: SegmentCalculatorEngine - rules, routing, BigDecimal rounding"]
+        S1 --> S2 --> S3
     end
 
-    subgraph RoutingResilience ["Routing & Resilience Layer"]
-        RoutingSvc["RoutingService"]
-        GridCache["RoutingCache (Caffeine LRU, ~11m grid)"]
-        RateLimiter["RoutingRateLimiter (Token Bucket)"]
-        CircuitBreaker["RoutingCircuitBreaker (10-sample ring, 50% threshold)"]
-        Provider["RoutingProvider (Simulated / Maps API)"]
-        RoutingSvc --> GridCache --> RateLimiter --> CircuitBreaker --> Provider
+    subgraph Routing["Routing and resilience - plain Java"]
+        RS["RoutingService"] --> RC["RoutingCache - 11 m grid"] --> RL["RoutingRateLimiter"] --> CB["RoutingCircuitBreaker"] --> RP["RoutingProvider - simulated"]
     end
 
-    subgraph Persistence ["Persistence & Audit"]
-        TripRepo[("PostgreSQL / H2<br/>trips & trip_segments")]
-        AdjRepo[("PostgreSQL / H2<br/>trip_adjustments (Signed Ledger)")]
+    subgraph Store["Persistence"]
+        T[("trips + trip_segments")]
+        A[("trip_adjustments")]
     end
 
-    TripSvc --> PureJavaCore
-    Stage3 --> RoutingSvc
-    TripSvc --> TripRepo
-    TripSvc --> AdjRepo
+    Svc --> Core
+    S3 --> RS
+    Svc -->|"narrow write transaction"| T
+    Svc -->|"on recompute"| A
 ```
+
+**Key boundaries**
+
+- The engine depends only on the `RoutingProvider` interface; swapping the simulator for OSRM or Google Maps needs no rule changes.
+- Computation and routing happen **before** the DB transaction opens, so a connection is held only for the final insert.
+- Versioning and signed deltas (`RecomputeDelta`) live in `TripDistanceService`, outside the pure engine.
 
 ---
 
-## 3. The 4-Stage Distance Rebuilding Pipeline
+## 3. Processing Pipeline
 
-```
-Raw Pings ──> [ Stage I: StreamCleaner ] ──> [ Stage II: AnchorPatch ] ──> [ Stage III: SegmentCalc ] ──> [ Stage IV: RecomputeDelta ]
-                 - Dedupe by timestamp         - Injected pickups/drops      - Short gap < 70s: Aerial        - Immutable append-only
-                 - Chronological TimSort       - Fallback: Home vs Planned   - Parked < 5 km/h: Aerial        - Signed Delta:
-                 - Drop accuracy > 50m         - Office 400m Rule            - Real gap: Snapped Grid Cache     +X.XX km CREDIT_NOTE
-                 - Drop speed > 120 km/h       - No-Show anchor flag         - Outage: 1.4x Fallback (DEGRADED) -X.XX km DEBIT_NOTE
-```
+1. **Stream cleaning (`StreamCleaner`)** — drop malformed fixes; for duplicate timestamps keep the smallest accuracy radius; sort by time; drop accuracy > 50 m; drop a ping whose implied speed from the **last accepted** ping exceeds 120 km/h.
+2. **Gap patching (`AnchorPatchEngine`)** — insert pickup / drop / no-show anchors. If a milestone has no usable coordinate, fall back by rider type: `PLANNED` → planned stop → home location; `AD_HOC` → home location → planned stop. The actual trip-end point is used only if within 400 m of the office; otherwise the office coordinate is anchored.
+3. **Segment measurement (`SegmentCalculatorEngine`)** — evaluated in this order:
 
-1. **Stage I: Stream Cleaning (`StreamCleaner`)**: Drops malformed fixes; deduplicates coincident timestamps picking the lowest accuracy radius; sorts chronologically; drops accuracy $> 50$m; rejects teleport jumps ($> 120$ km/h) evaluated strictly against `lastAccepted` valid fix.
-2. **Stage II: Gap Patching (`AnchorPatchEngine`)**: Injects business milestones into GPS blackout zones (underpasses/basements). Fallback precedence: `AD_HOC` $\to$ Profile Home + Sign-in Time; `PLANNED` $\to$ Planned Stop. Enforces **Office 400m Rule**: actual end point used only if $\le 400$m from office, else planned office location is anchored.
-3. **Stage III: Segment Distance (`SegmentCalculatorEngine`)**: Evaluates cheap rules first (`SHORT_GAP_AERIAL` for $\Delta t < 70$s, `PARKED` for $\Delta t \ge 70$s at $< 5$ km/h). Real gaps query `RoutingService`. If provider is down/circuit open, applies $1.4\times\text{Haversine}$ and marks trip `DEGRADED`.
-4. **Stage IV: Deterministic Rounding & Signed Deltas (`RecomputeDelta`)**: Segments summed in `BigDecimal` (`HALF_UP`, 3 decimals); total scaled to 2 decimals (`0.01 km`). Recomputation generates signed delta adjustments (`CREDIT_NOTE` / `DEBIT_NOTE`).
+   | Order | Condition | Rule | Distance |
+   | :-: | :--- | :--- | :--- |
+   | 1 | Gap < 70 s **and** implied speed ≤ 120 km/h | `SHORT_GAP_AERIAL` | Haversine |
+   | 2 | Gap ≥ 70 s **and** implied speed < 5 km/h | `PARKED` | Haversine |
+   | 3 | Otherwise → routing: rate limiter has no permit | `DEGRADED_RATE_LIMITED` | 1.4 × Haversine |
+   | 4 | Circuit breaker open | `DEGRADED_CIRCUIT_OPEN` | 1.4 × Haversine |
+   | 5 | Provider error | `DEGRADED_PROVIDER_ERROR` | 1.4 × Haversine |
+   | 6 | Routed distance > 100 km | `REJECTED_MAX_DISTANCE` | Haversine |
+   | 7 | Routed speed > 120 km/h **and** 1.4 × aerial speed > 120 km/h | `REJECTED_SPEED` | Haversine |
+   | 8 | Valid route (cache hit or live call) | `ROUTED` | Road distance |
+
+   Any `DEGRADED_*` segment marks the whole trip `DEGRADED`. A short gap with implied speed above 120 km/h is **not** treated as a short gap; it is sent to routing so the distance can be validated.
+
+4. **Rounding** — each segment is rounded to 3 decimals and summed with `BigDecimal`; the trip total is rounded to 2 decimals (`0.01 km`), `HALF_UP`. Same evidence + same rule version (`v1.2.0`) ⇒ same result.
 
 ---
 
-## 4. Sequence Diagram: Outage Fallback & Post-Billing Recompute
+## 4. Outage and Late-Ping Recompute
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Vendor as Cab / Billing Client
+    actor Client as Vendor / Ops client
     participant API as TripController
     participant Svc as TripDistanceService
-    participant Engine as RebuildingEngine
+    participant Eng as RebuildingEngine
     participant Route as RoutingService
     participant DB as PostgreSQL / H2
 
-    Note over Vendor,DB: Phase 1: Ingestion During Maps Provider Outage
-    Vendor->>API: POST /api/v1/trips/calculate (Pings, Milestones, Office)
+    Note over Client,DB: Phase 1 - calculated during a routing outage
+    Client->>API: POST /api/v1/trips/calculate
     API->>Svc: calculateAndSave(evidence)
-    Svc->>Engine: clean + patch + calculate
-    Engine->>Route: getDrivingRoute(start, end)
-    Route-->>Engine: Circuit Breaker OPEN -> Fallback 1.4x Aerial
-    Engine-->>Svc: TripDistanceResult v1 = 28.80 km (DEGRADED)
-    Svc->>DB: INSERT trips v1 and trip_segments
-    Svc-->>API: 200 OK (v1 Invoice Billed)
+    Svc->>Eng: clean, patch, measure
+    Eng->>Route: getDrivingRoute(start, end)
+    Route-->>Eng: circuit OPEN - 1.4x aerial fallback
+    Eng-->>Svc: v1 = 28.80 km, DEGRADED
+    Svc->>DB: insert trip v1 and segments
+    Svc-->>API: 200 OK - v1 billed
 
-    Note over Vendor,DB: Phase 2: Provider Recovers & Late Pings Arrive
-    Vendor->>API: POST /api/v1/trips/{tripId}/recompute (Late Pings)
-    API->>Svc: recomputeTrip(tripId, updatedEvidence, reason)
-    Svc->>DB: SELECT latest trip version v1
-    Svc->>Engine: Recompute with merged pings (v2)
-    Engine->>Route: getDrivingRoute(start, end)
-    Route-->>Engine: Provider Recovered -> Live Road Distance
-    Engine-->>Svc: TripDistanceResult v2 = 30.60 km (COMPLETED)
-    Svc->>Svc: Delta: 30.60 - 28.80 = +1.80 km (CREDIT_NOTE)
-    Svc->>DB: INSERT trips v2 (v1 untouched)
-    Svc->>DB: INSERT trip_adjustments (+1.80 km CREDIT_NOTE)
-    Svc-->>API: 200 OK (Signed Delta +1.80 km)
+    Note over Client,DB: Phase 2 - provider recovers, late pings arrive
+    Client->>API: POST /api/v1/trips/TRIP-ID/recompute
+    API->>Svc: recomputeTrip(tripId, latePings, reason)
+    Svc->>DB: load latest version v1 and its evidence snapshot
+    Svc->>Eng: rebuild with merged evidence
+    Eng->>Route: getDrivingRoute(start, end)
+    Route-->>Eng: live road distance
+    Eng-->>Svc: v2 = 30.60 km, COMPLETED
+    Svc->>Svc: delta = +1.80 km - CREDIT_NOTE
+    Svc->>DB: insert v2 and adjustment in one transaction, v1 unchanged
+    Svc-->>API: 200 OK - signed delta +1.80 km
 ```
+
+Delta = round₂(new) − round₂(previous): positive → `CREDIT_NOTE`, negative → `DEBIT_NOTE`, zero → `NO_CHANGE`.
 
 ---
 
-## 5. Database Schema (Multi-Tenant Audit Ledger)
+## 5. Data Model
 
 ```mermaid
 erDiagram
-    TRIPS ||--o{ TRIP_SEGMENTS : "1:N (cascade)"
-    TRIPS ||--o{ TRIP_ADJUSTMENTS : "v_prev -> v_new"
+    TRIPS ||--o{ TRIP_SEGMENTS : "segments per version"
+    TRIPS ||--o{ TRIP_ADJUSTMENTS : "versions linked by"
 
     TRIPS {
         bigint id PK
-        varchar trip_id "Index (trip_id, tenant_id)"
-        varchar tenant_id "Multi-tenant partition key"
-        int version "Unique per (trip_id, tenant_id, version)"
-        double total_distance_km "2 decimal billing scale"
-        varchar status "COMPLETED | DEGRADED | RECOMPUTED"
-        varchar rule_version "e.g. v1.2.0"
-        varchar idempotency_key "Unique invoice key"
-        text evidence_snapshot "Base64 raw input snapshot"
+        varchar trip_id
+        varchar tenant_id
+        int version
+        double total_distance_km
+        varchar status "COMPLETED, DEGRADED, RECOMPUTED"
+        varchar rule_version
+        varchar idempotency_key
+        text evidence_snapshot "Base64 serialized input"
         timestamp calculated_at
     }
 
     TRIP_SEGMENTS {
         bigint id PK
-        bigint trip_record_id FK
-        int segment_index "1-based order"
-        double start_lat
-        double start_lon
-        double end_lat
-        double end_lon
+        varchar trip_id
+        varchar tenant_id
+        int version
+        int segment_index
+        double start_latitude
+        double start_longitude
+        double end_latitude
+        double end_longitude
+        bigint delta_seconds
         double final_distance_km
-        varchar rule_applied "ROUTED | SHORT_GAP_AERIAL | ..."
-        varchar explanation "Dispute explanation string"
+        varchar rule
         boolean routed
+        varchar explanation
     }
 
     TRIP_ADJUSTMENTS {
         bigint id PK
-        varchar trip_id "Index (trip_id, tenant_id)"
+        varchar trip_id
         varchar tenant_id
         int previous_version
         int new_version
-        double previous_distance_km
-        double new_distance_km
-        double delta_km "Signed delta"
-        varchar formatted_delta "+1.80 km | -8.47 km"
-        varchar adjustment_type "CREDIT_NOTE | DEBIT_NOTE | NO_CHANGE"
+        double delta_km
+        varchar formatted_delta
+        varchar adjustment_type "CREDIT_NOTE, DEBIT_NOTE, NO_CHANGE"
         varchar reason
         timestamp created_at
     }
 ```
 
+- **Unique** `(trip_id, tenant_id, version)` — one row per version; a concurrent duplicate recompute fails instead of overwriting.
+- `(status, tenant_id)` index — finds `DEGRADED` trips for reconciliation.
+- `(trip_id, tenant_id, idempotency_key)` index — replays of the same request return the stored result.
+- The evidence snapshot lets a recompute merge only the **new** late pings with the original input.
+
 ---
 
-## 6. Failure-Mode Analysis Matrix
+## 6. Failure Modes
 
-| Failure Scenario | Root Cause | System Mitigation | Business / Billing Outcome |
+| Failure | Cause | Mitigation | Outcome |
 | :--- | :--- | :--- | :--- |
-| **GPS Teleport Jump** | Urban canyon multipath ($> 8,000$ km/h burst) | Speed evaluated against `lastAccepted` valid fix; candidate dropped. | Vendor not over-paid; noisy burst rejected cleanly. |
-| **GPS Dilution Noise** | Satellite scatter in covered driveway ($> 50$m radius) | Dropped in Stage I accuracy filter (`accuracyMeters > 50m`). | Prevents phantom zig-zag mileage inflation. |
-| **22-min Underpass Gap** | Satellite blackout during passenger drops | Stage II injects milestone anchors; Stage III routes gap. | Vendor paid true road distance ($30.6$ km vs naive $18.4$ km). |
-| **Employee No-Show** | Cab arrived at pickup; rider cancelled/absent | Feature flag `includeNoShowAnchors` anchors planned stop. | Vendor fairly paid for deadhead pickup detour. |
-| **Late Trip-End (> 400m)** | Driver ends trip 3 km away at gas station | Office 400m rule snaps end point to planned office location. | Prevents over-billing for post-trip personal driving. |
-| **Maps Provider Outage** | 3 AM provider $503$ or rate limit exhausted | Circuit breaker opens; applies $1.4\times$ Haversine; marks `DEGRADED`. | Zero fleet downtime; auto-healed via `/reconcile-degraded`. |
-| **Post-Billing Late Pings** | Phone syncs delayed pings hours after invoice closed | Append-only recompute produces signed `CREDIT_NOTE` / `DEBIT_NOTE`. | Original invoice never mutated; full accounting audit trail. |
-| **Cross-Tenant Leakage** | Buggy or malicious client query | `TenantFilter` + `TenantContext` binds all queries to tenant ID. | Hard data barrier; returns 404 across tenant boundaries. |
+| Teleport jump | Multipath fix implying > 8,000 km/h | Speed checked against last accepted ping; ping dropped | No phantom distance |
+| Low-accuracy fix | Accuracy radius > 50 m | Dropped in stage 1 | No zig-zag inflation |
+| Long GPS blackout | Underpass / basement during pickups | Milestone anchors + routed gap | Road distance paid (~30.6 km vs ~18.4 km naive) |
+| Employee no-show | Rider absent at pickup | `includeNoShowAnchors` anchors the stop | Vendor paid for the detour |
+| Trip ended far from office | Driver ends trip > 400 m away | End point snapped to office | No billing for post-trip driving |
+| Provider outage / throttling | `503`, timeouts, quota | Breaker (10-call window, 50 %, 3 s reset, 3 trial calls) or rate limiter → `1.4×` fallback, trip `DEGRADED` | Billing continues; healed via `/admin/reconcile-degraded` |
+| Implausible provider route | > 100 km or impossible speed | Provider result discarded, Haversine used | Bad route never billed |
+| Late pings after billing | Phone syncs hours later | New version + signed adjustment | Original invoice untouched |
+| Duplicate submission | Client retry | `X-Idempotency-Key` replay | No double billing |
+| Cross-tenant access | Buggy / malicious client | Every query scoped by `TenantContext` | Treated as not found (`400`); no data leak |
 
 ---
 
-## 7. Performance & Empirical Benchmark
+## 7. Performance
 
-Validated on AMD Ryzen 5 5500H (Windows 11, OpenJDK 64-Bit, 15M pings):
+`ScaleBenchmarkTest` — engine only (no HTTP, DB or network), simulated provider with an injected outage for trips 4,000–4,500, AMD Ryzen 5 5500H, Windows 11, OpenJDK 21:
 
-- **Workload**: 10,000 trips $\times$ 1,500 pings = **15,000,000 pings**
-- **Throughput**: **508.83 trips/sec** (**763,242 pings/sec**)
-- **Latencies**: $p50 = 1.78\text{ ms}$, $p95 = 2.84\text{ ms}$, $p99 = 4.41\text{ ms}$
-- **Net Heap Overhead**: **2.27 MB** (bounded linear memory $\mathcal{O}(N)$)
-- **Time Complexity**: $\mathcal{O}(N \log N)$ comparison-sorted stream lower bound; spatial routing cache lookup is $\mathcal{O}(1)$.
+| Metric | Result |
+| :--- | :--- |
+| Workload | 10,000 trips × 1,500 pings = 15M pings |
+| Throughput | 508.8 trips/s · 763,242 pings/s |
+| Latency per trip | p50 1.78 ms · p95 2.84 ms · p99 4.42 ms |
+| Route cache hit rate | 90.0 % (13,497 / 15,000) |
+| Heap growth | 2.27 MB |
+
+Complexity: `O(N log N)` per trip (sorting), `O(N)` memory; route cache bounded at 50,000 entries.
 
 ---
 
-## 8. Scalability & Production Hardening
+## 8. Scaling and Hardening
 
-1. **Narrow Transactions (`TransactionTemplate`)**: Heavy CPU math and routing I/O execute outside database transactions; HikariCP connection held only for $\sim 2$ ms during entity write.
-2. **Raw Evidence Snapshots**: Stored as compressed Base64 snapshots on `trips`; incremental `/recompute` needs only new late pings.
-3. **Idempotency Protection**: `X-Idempotency-Key` header prevents duplicate billing on network retries.
-4. **Outbound Protection Shield**: 4-decimal spatial grid cache ($\sim 11.1$m resolution, 99% hit rate) + token-bucket rate limiter + sliding ring-buffer circuit breaker protect third-party routing quotas.
-5. **Horizontal Growth**: Stateless core engine allows multi-node deployment behind a load balancer; Kafka keying by `tripId` guarantees ordered single-partition processing per trip.
+1. **Narrow transactions** — computation and routing run outside the transaction; the DB connection is held only for the write.
+2. **Evidence snapshots** — recompute needs only the late pings; the original input is restored from the snapshot.
+3. **Idempotency** — optional `X-Idempotency-Key` prevents duplicate billing on retries.
+4. **Outbound protection** — grid cache + token bucket + circuit breaker keep provider cost and quota under control.
+5. **Horizontal scale** — the engine is stateless apart from a per-instance cache, so nodes can sit behind a load balancer.
+6. **Next steps (not implemented)** — shared Redis cache, Kafka ingestion keyed by `tripId` for per-trip ordering, versioned DB migrations, JWT auth, real routing adapter.

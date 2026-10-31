@@ -526,6 +526,7 @@ Import `MoveInSync_Trip_Distance_Engine.postman_collection.json` — it contains
 | `X-Tenant-ID` | ✅ | `moveinsync-client-1` | Tenant scope for every read and write |
 | `X-User-Role` | ✅ | `ROLE_OPERATOR` | One of `ROLE_EMPLOYEE`, `ROLE_OPERATOR`, `ROLE_ADMIN` |
 | `X-Trace-ID` | – | `trace-blr-9921` | Correlation ID (generated if absent) |
+| `X-Idempotency-Key` | – | `inv-1001-attempt` | On `/calculate`: a retried request with the same key returns the stored result instead of billing twice |
 
 > [!NOTE]
 > Header-based identity is used to keep the case study self-contained. In production, tenant and role would come from a validated JWT issued by the identity provider.
@@ -710,6 +711,7 @@ Error bodies include the request path and the `traceId` for log correlation.
 | Implausible provider route | > 100 km or impossible speed | Provider result discarded, Haversine used | `REJECTED_MAX_DISTANCE` / `REJECTED_SPEED` |
 | Late data after billing | Recompute request | New version + signed adjustment; old version kept | `trip_adjustments` row |
 | Concurrent recompute of same trip | Unique `(trip_id, tenant_id, version)` | Second writer fails instead of silently overwriting | HTTP error, no duplicate version |
+| Client retries `/calculate` | `X-Idempotency-Key` match | Stored result returned | No double billing |
 | DB pool exhaustion risk | — | Routing and computation done outside the transaction | Short write transactions only |
 | Cross-tenant access | Tenant filter on every query | Treated as "not found"; another tenant's data is never returned | `TenantIsolationTest` |
 | PII in errors / logs | — | Emails, phone numbers and addresses masked | `PiiMasker` |
