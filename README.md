@@ -14,7 +14,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![Tests](https://img.shields.io/badge/Tests-55%20passed%20(17%20classes)-success)](#16-testing-and-verification)
 
-[Quick Start](#12-how-to-run-the-project) · [Architecture](#5-high-level-system-architecture) · [API](#13-api-reference-with-sample-requests-and-responses) · [Benchmarks](#15-benchmark-results-and-methodology) · [Design Note](DESIGN.md)
+[Quick Start](#12-quick-start--how-to-run) · [Architecture](#5-high-level-system-architecture) · [API](#13-api-reference-with-sample-requests-and-responses) · [Benchmarks](#15-benchmark-results-and-methodology) · [Design Note](DESIGN.md)
 
 </div>
 
@@ -46,7 +46,7 @@
 9. [Data Model and Database Design](#9-data-model-and-database-design)
 10. [Assumptions and Business Rules](#10-assumptions-and-business-rules)
 11. [Repository and Package Structure](#11-repository-and-package-structure)
-12. [How to Run the Project](#12-how-to-run-the-project)
+12. [Quick Start & How to Run](#12-quick-start--how-to-run)
 13. [API Reference with Sample Requests and Responses](#13-api-reference-with-sample-requests-and-responses)
 14. [Failure Handling and Resilience](#14-failure-handling-and-resilience)
 15. [Benchmark Results and Methodology](#15-benchmark-results-and-methodology)
@@ -529,29 +529,53 @@ All thresholds live in `EngineConfig` and are stamped with a rule version, so an
 
 ---
 
-## 12. How to Run the Project
+## 12. Quick Start & How to Run
 
-### Option A — Local (H2 in-memory, fastest)
+### ⚡ 60-Second Quick Start
+
+You can run the engine with zero setup in-memory, or spin up the full production stack:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/kamran-asif/GPS-Gap-Backfill-Billable-Distance-Reconstruction.git
+cd GPS-Gap-Backfill-Billable-Distance-Reconstruction
+
+# 2A. Run locally (Zero dependencies, H2 in-memory DB, fastest)
+mvn spring-boot:run
+
+# 2B. OR run full enterprise stack (PostgreSQL 16 + Redis 7 + Kafka 3.7 + Engine)
+docker compose up --build
+```
+
+---
+
+### Option A — Local Development (H2 In-Memory, Fastest)
+
+Best for rapid local evaluation and testing without installing PostgreSQL, Redis, or Kafka:
 
 ```powershell
 mvn spring-boot:run
 ```
 
-| Resource | URL / value |
-| :--- | :--- |
-| API base | `http://localhost:8080/api/v1` |
-| H2 console | `http://localhost:8080/h2-console` — JDBC URL `jdbc:h2:mem:moveinsync_db`, user `sa`, empty password |
-| Health | `http://localhost:8080/actuator/health` |
-| Prometheus metrics | `http://localhost:8080/actuator/prometheus` |
+| Resource | URL / Value | Description |
+| :--- | :--- | :--- |
+| **API Base URL** | `http://localhost:8080/api/v1` | Core REST API endpoints |
+| **H2 Web Console** | `http://localhost:8080/h2-console` | JDBC: `jdbc:h2:mem:moveinsync_db` (User: `sa`, Password: *blank*) |
+| **Health Check** | `http://localhost:8080/actuator/health` | Live service & database health status |
+| **Prometheus Metrics** | `http://localhost:8080/actuator/prometheus` | Real-time calculation latency & cache counters |
+
+---
 
 ### Option B — Production Docker Compose Stack (PostgreSQL 16, Redis 7, Apache Kafka 3.7)
+
+Spins up the complete multi-tier enterprise topology with Flyway migrations, Redis route caching, and Kafka partitioning:
 
 ```powershell
 docker compose up --build
 ```
 
-| Service | Port | Role & Configuration |
-| :--- | :--- | :--- |
+| Container / Service | Port | Role & Configuration |
+| :--- | :---: | :--- |
 | `moveinsync-trip-distance-engine` | `8080` | Spring Boot engine (Flyway migrations, L2 Redis cache, Kafka ingestion, Actuator) |
 | `moveinsync-postgres` | `5432` | PostgreSQL 16 (`moveinsync` / `moveinsync_secret`, database `moveinsync`) |
 | `moveinsync-redis` | `6379` | Redis 7 distributed L2 spatial route cache |
@@ -560,16 +584,37 @@ docker compose up --build
 > [!NOTE]
 > Default credentials are provided for zero-setup local evaluation. In production environments, credentials are dynamically injected via environment variables or a secret manager.
 
-### Option C — Executable JAR
+---
+
+### Option C — Standalone Executable JAR
+
+Build an optimized, self-contained production JAR:
 
 ```powershell
+# Build JAR artifact
 mvn clean package -DskipTests
+
+# Run JAR
 java -jar target/trip-distance-engine-1.0.0.jar
 ```
 
-### Try it with Postman
+---
 
-Import `MoveInSync_Trip_Distance_Engine.postman_collection.json` — it contains ready-made requests for calculation, recomputation, audit retrieval and admin controls.
+### 🧪 Immediate Verification & Postman
+
+Verify that the service is healthy with a quick curl check:
+
+```bash
+curl -i http://localhost:8080/actuator/health
+```
+
+**Ready-Made Postman Collection**:  
+Import [`MoveInSync_Trip_Distance_Engine.postman_collection.json`](file:///c:/Users/Lenovo/Desktop/MoveInSync%20Case%20Study/MoveInSync_Trip_Distance_Engine.postman_collection.json) into Postman — it includes pre-configured, end-to-end request templates for:
+- **Auth**: Obtain JWT Bearer Token (`POST /api/v1/auth/token`)
+- **Calculation**: Submit raw pings and milestones (`POST /api/v1/trips/calculate`)
+- **Recomputation**: Inject late pings and generate signed delta (`POST /api/v1/trips/{tripId}/recompute`)
+- **Audit**: Inspect full per-segment breakdown (`GET /api/v1/trips/{tripId}`)
+- **Admin**: Circuit breaker controls, cache clearing, and degraded trip reconciliation
 
 ---
 
