@@ -27,3 +27,4 @@ class OsrmRoutingProviderTest {
         assertThat(result.getErrorMessage()).contains("OSRM call exception");
     }
 }
+

@@ -92,3 +92,4 @@ public class OsrmRoutingProvider implements RoutingProvider {
         return baseUrl;
     }
 }
+

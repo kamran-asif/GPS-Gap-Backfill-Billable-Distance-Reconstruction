@@ -14,3 +14,4 @@ CREATE TABLE IF NOT EXISTS outbox_events (
 
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_events (status, created_at);
 CREATE INDEX IF NOT EXISTS idx_outbox_aggregate ON outbox_events (aggregate_type, aggregate_id);
+

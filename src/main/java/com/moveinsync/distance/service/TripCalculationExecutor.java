@@ -6,3 +6,4 @@ import com.moveinsync.distance.domain.TripEvidence;
 public interface TripCalculationExecutor {
     TripDistanceResult calculateAndSave(TripEvidence evidence, String idempotencyKey);
 }
+

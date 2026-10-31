@@ -53,3 +53,4 @@ public class TripKafkaProducer {
                 adjustment.tripId(), adjustment.formattedDelta());
     }
 }
+

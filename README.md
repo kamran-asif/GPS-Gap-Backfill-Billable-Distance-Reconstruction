@@ -7,8 +7,12 @@
 [![Java](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)](https://openjdk.org/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3.4-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3.7-231F20?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
+[![Flyway](https://img.shields.io/badge/Flyway-10-CC0202?logo=flyway&logoColor=white)](https://flywaydb.org/)
+[![JWT](https://img.shields.io/badge/Auth-JWT%20(RFC%207519)-black?logo=jsonwebtokens&logoColor=white)](https://jwt.io/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
-[![Tests](https://img.shields.io/badge/Test%20classes-14-success)](#16-testing-and-verification)
+[![Tests](https://img.shields.io/badge/Tests-55%20passed%20(17%20classes)-success)](#16-testing-and-verification)
 
 [Quick Start](#12-how-to-run-the-project) · [Architecture](#5-high-level-system-architecture) · [API](#13-api-reference-with-sample-requests-and-responses) · [Benchmarks](#15-benchmark-results-and-methodology) · [Design Note](DESIGN.md)
 
@@ -96,13 +100,18 @@ A naive approach — summing straight lines between consecutive pings — fails 
 | **Gap patching** | Inserts pickup / drop / no-show anchors with a rider-type-aware fallback chain (actual → planned stop / home location) | `AnchorPatchEngine` |
 | **Office rule** | Uses the actual trip-end point only if it lies within 400 m of the office; otherwise anchors the office coordinate | `AnchorPatchEngine` |
 | **Segment rules** | Short gaps (< 70 s) and parked gaps (≥ 70 s, < 5 km/h) use Haversine; real gaps are routed; implausible routes are rejected | `SegmentCalculatorEngine`, `DistanceRule` |
-| **Route caching** | Coordinates snapped to a 4-decimal grid (~11 m); Caffeine cache with 50,000 entries and 24 h TTL | `RoutingCache` |
+| **Multi-tier route cache** | Coordinates snapped to ~11 m grid; L1 Caffeine in-memory (50k entries) + L2 Redis shared cluster with automatic graceful degradation on network fault | `RoutingCache`, `RedisRouteStorage`, `SpringDataRedisRouteStorage` |
+| **Real road routing adapter** | Pluggable provider interface with built-in Open Source Routing Machine (OSRM) HTTP client, configurable timeouts, and circuit breaker integration | `RoutingProvider`, `OsrmRoutingProvider` |
 | **Rate limiting** | Client-side token bucket protects provider quota; throttled calls degrade instead of queueing | `RoutingRateLimiter` |
 | **Circuit breaking** | Sliding-window breaker (CLOSED → OPEN → HALF_OPEN); open circuit triggers `1.4×` aerial fallback and marks the trip `DEGRADED` | `RoutingCircuitBreaker` |
 | **Deterministic money math** | `BigDecimal` with `HALF_UP`: segments at 3 dp, trip total at 2 dp | `SegmentCalculatorEngine` |
 | **Versioned recalculation** | New version per recompute + signed adjustment (`CREDIT_NOTE` / `DEBIT_NOTE` / `NO_CHANGE`) committed atomically | `TripDistanceService`, `RecomputeDelta` |
+| **Kafka stream ingestion** | Ingestion topic partitioned strictly by `tripId` for guaranteed per-trip FIFO ordering across mobile disconnects & reconnects | `TripKafkaConsumer`, `TripKafkaBufferService` |
+| **Transactional outbox** | Guaranteed at-least-once publishing of signed billing adjustments to downstream accounting pipelines | `OutboxEventEntity`, `OutboxRelayService` |
+| **Database migrations** | Flyway version-controlled migrations (`V1__init_schema.sql`, `V2__create_outbox_table.sql`) with safe auto-baseline | `db/migration` |
+| **Stateless JWT auth & RBAC** | RFC 7519 HMAC-SHA256 token authentication (`/api/v1/auth/token`), role enforcement, with backward-compatible dev headers | `JwtTokenProvider`, `AuthController`, `TenantFilter` |
 | **Batch & parallel** | Memory-bounded chunking with retries; order-preserving parallel execution | `BatchTripProcessor`, `ParallelTripProcessor` |
-| **Multi-tenancy & RBAC** | `X-Tenant-ID` scoping on every query; role-based access; PII masked in error responses | `TenantFilter`, `SecurityConfig`, `PiiMasker` |
+| **Multi-tenancy & privacy** | `X-Tenant-ID` scoping on every query; role-based access; PII masked in error responses | `TenantFilter`, `SecurityConfig`, `PiiMasker` |
 | **Observability** | Micrometer metrics at `/actuator/prometheus`; trace ID propagated through MDC | `EngineMetrics` |
 
 ---
@@ -113,12 +122,16 @@ A naive approach — summing straight lines between consecutive pings — fails 
 
 | Layer | Technology |
 | :--- | :--- |
-| Language | Java 21 |
+| Language | Java 21 (LTS) |
 | Framework | Spring Boot 3.3.4 (Web, Security, Data JPA, Validation, Actuator) |
 | Database | PostgreSQL 16 (Docker profile) · H2 in-memory, PostgreSQL mode (default local profile) |
-| Caching | Caffeine |
-| Observability | Micrometer + Prometheus registry, SLF4J / Logback MDC |
-| Packaging | Maven, multi-stage Dockerfile, Docker Compose |
+| Migrations | Flyway 10 (repeatable DDL versioning: `V1__init_schema.sql`, `V2__create_outbox_table.sql`) |
+| Distributed Caching | Multi-tier: L1 Caffeine in-memory + L2 Redis 7 (Spring Data Redis) |
+| Messaging & Streaming | Apache Kafka 3.7 (KRaft mode, topic `trip-gps-pings` partitioned by `tripId`) |
+| Authentication | RFC 7519 JWT (HMAC-SHA256, standard Java crypto, zero external identity library dependencies) |
+| Routing Providers | Pluggable interface: `SimulatedRoutingProvider` (tests/benchmark) + `OsrmRoutingProvider` (OSRM HTTP API) |
+| Observability | Micrometer + Prometheus registry (`/actuator/prometheus`), SLF4J / Logback MDC |
+| Packaging | Maven, multi-stage Dockerfile, Docker Compose (Postgres + Redis + Kafka) |
 | Testing | JUnit 5, AssertJ, Spring MockMvc, Spring Security Test |
 
 ### Prerequisites
@@ -135,43 +148,56 @@ A naive approach — summing straight lines between consecutive pings — fails 
 
 ```mermaid
 flowchart TD
-    subgraph Clients["Clients"]
-        A["Driver app / GPS tracker"]
-        B["Trip events: pickups, drops, no-shows, office"]
-        C["Ops / billing operator"]
+    subgraph Ingestion["Ingestion & Client Sources"]
+        A["Driver Mobile App / GPS Tracker"]
+        B["Trip Events: Pickups, Drops, No-shows, Office"]
+        C["Ops / Finance Billing Client"]
     end
 
-    subgraph Edge["API and Security Layer - Spring"]
-        F["TenantFilter: X-Tenant-ID, X-User-Role, X-Trace-ID"]
+    subgraph Streaming["Streaming Buffer - Apache Kafka"]
+        KP["TripKafkaProducer"]
+        KT[("trip-gps-pings topic<br/>(Keyed by tripId)")]
+        KC["TripKafkaConsumer"]
+        KBUF["TripKafkaBufferService"]
+    end
+
+    subgraph Edge["API & Security Gateway - Spring"]
+        AUTH["AuthController (/api/v1/auth/token)"]
+        F["TenantFilter<br/>(JWT Bearer Token / TenantContext)"]
         API["TripController / AdminController"]
     end
 
-    subgraph App["Application Layer - Spring"]
+    subgraph App["Application & Orchestration Layer"]
         SVC["TripDistanceService"]
         BATCH["TripBatchService"]
+        OUTBOX["OutboxRelayService (Scheduler)"]
     end
 
-    subgraph Core["Distance Engine - plain Java"]
+    subgraph Core["Distance Engine - Plain Java (Zero Framework Dependency)"]
         ENG["TripDistanceRebuildingEngine"]
         S1["Stage 1: StreamCleaner"]
         S2["Stage 2: AnchorPatchEngine"]
         S3["Stage 3: SegmentCalculatorEngine"]
     end
 
-    subgraph Routing["Routing Layer - plain Java"]
+    subgraph Routing["Multi-Tier Routing Subsystem"]
         RS["RoutingService"]
-        RC["RoutingCache - 11 m grid, 50k entries"]
-        RL["RoutingRateLimiter - token bucket"]
-        CB["RoutingCircuitBreaker"]
-        RP["RoutingProvider - simulated maps API"]
+        L1["L1 Caffeine (50k entries, ~11 m grid)"]
+        L2[("L2 Redis 7 Cache Cluster")]
+        RL["RoutingRateLimiter (Token Bucket)"]
+        CB["RoutingCircuitBreaker (Sliding Window)"]
+        RP["RoutingProvider (Simulated / OSRM HTTP)"]
     end
 
-    subgraph Store["Persistence"]
-        DB[("PostgreSQL / H2: trips, trip_segments, trip_adjustments")]
+    subgraph Store["Persistence & Audit Storage (Flyway Managed)"]
+        DB[("PostgreSQL 16 / H2<br/>trips, trip_segments,<br/>trip_adjustments, outbox_events")]
     end
 
-    A --> F
+    A -- "Raw Pings (Stream)" --> KP --> KT --> KC --> KBUF --> SVC
+    A -- "Batch REST" --> F
     B --> F
+    C --> AUTH
+    AUTH -- "Signed JWT" --> C
     C --> F
     F --> API
     API --> SVC
@@ -180,9 +206,12 @@ flowchart TD
     SVC --> ENG
     ENG --> S1 --> S2 --> S3
     S3 --> RS
-    RS --> RC
-    RC -- miss --> RL --> CB --> RP
-    SVC -- "narrow write transaction" --> DB
+    RS --> L1
+    L1 -- miss --> L2
+    L2 -- miss --> RL --> CB --> RP
+    SVC -- "Atomic write transaction" --> DB
+    OUTBOX -- "Poll pending events" --> DB
+    OUTBOX -- "Dispatched adjustments" --> KT
 ```
 
 **Design principles**
@@ -337,6 +366,7 @@ Degraded trips can also be healed in bulk via `POST /api/v1/admin/reconcile-degr
 erDiagram
     TRIPS ||--o{ TRIP_SEGMENTS : "has segments per version"
     TRIPS ||--o{ TRIP_ADJUSTMENTS : "versions linked by"
+    TRIP_ADJUSTMENTS ||--o| OUTBOX_EVENTS : "publishes adjustment event"
 
     TRIPS {
         bigint id PK
@@ -367,19 +397,19 @@ erDiagram
         varchar tenant_id
         int version
         int segment_index
-        double start_latitude
-        double start_longitude
+        double start_lat
+        double start_lon
         timestamp start_time
         varchar start_type
-        double end_latitude
-        double end_longitude
+        double end_lat
+        double end_lon
         timestamp end_time
         varchar end_type
         bigint delta_seconds
         double implied_aerial_speed_kmh
         double aerial_distance_km
         double final_distance_km
-        varchar rule
+        varchar rule_applied
         boolean routed
         varchar explanation
     }
@@ -398,6 +428,17 @@ erDiagram
         varchar reason
         timestamp created_at
     }
+
+    OUTBOX_EVENTS {
+        bigint id PK
+        varchar aggregate_type
+        varchar aggregate_id
+        varchar event_type
+        text payload
+        varchar status "PENDING, SENT, FAILED"
+        timestamp created_at
+        timestamp processed_at
+    }
 ```
 
 ### Indexes and constraints
@@ -410,8 +451,13 @@ erDiagram
 | `idx_trip_idempotency` | `trip_id, tenant_id, idempotency_key` | Idempotent re-submission of the same evidence |
 | `idx_segment_trip_version` | `trip_id, tenant_id, version` | Loading the audit trail for one version |
 | `idx_adjustment_trip_tenant` | `trip_id, tenant_id` | Adjustment history for a trip |
+| `idx_outbox_status` | `status, created_at` | Efficient polling of pending events by the outbox relay |
 
-**Why this shape:** `trips` is append-only (one row per version), `trip_segments` makes every kilometre traceable, and `trip_adjustments` is the financial ledger that finance can reconcile without reading trip internals.
+**Why this shape:** `trips` is append-only (one row per version), `trip_segments` makes every kilometre traceable, `trip_adjustments` is the financial ledger that finance can reconcile without reading trip internals, and `outbox_events` enables guaranteed event publishing to Kafka without dual-write inconsistency.
+
+Schema evolution is version-controlled via **Flyway migrations** (`src/main/resources/db/migration`):
+- `V1__init_schema.sql`: Core relational tables, data types, and performance indexes.
+- `V2__create_outbox_table.sql`: Transactional outbox table with status-based indexing.
 
 ---
 
@@ -440,38 +486,46 @@ All thresholds live in `EngineConfig` and are stamped with a rule version, so an
 
 ```text
 .
-├── pom.xml                                   # Maven build
+├── pom.xml                                   # Maven build (Java 21, Spring Boot 3.3.4, Kafka, Redis, Flyway)
 ├── Dockerfile                                # Multi-stage image (Temurin 21 JRE)
-├── docker-compose.yml                        # App + PostgreSQL 16 with health checks
+├── docker-compose.yml                        # Full enterprise stack: App + Postgres 16 + Redis 7 + Kafka 3.7
 ├── MoveInSync_Trip_Distance_Engine.postman_collection.json
-├── DESIGN.md                                 # Design note: data model, components, APIs, failure modes
+├── DESIGN.md                                 # Architecture design note & benchmark report
 └── src
     ├── main
-    │   ├── resources/application.yml         # H2 default, Actuator, Prometheus, rate-limit settings
+    │   ├── resources
+    │   │   ├── application.yml               # H2 default, Kafka/Redis flags, Actuator, rate-limits
+    │   │   └── db/migration/                 # Flyway version-controlled migrations
+    │   │       ├── V1__init_schema.sql
+    │   │       └── V2__create_outbox_table.sql
     │   └── java/com/moveinsync/distance
     │       ├── TripDistanceEngineApplication.java
-    │       ├── config/       EngineAppConfig            # Wires the plain-Java engine as Spring beans
-    │       ├── controller/   TripController, AdminController, GlobalExceptionHandler
-    │       ├── dto/          Request / response objects
+    │       ├── config/       EngineAppConfig            # Wires engine, OSRM provider, & multi-tier cache
+    │       ├── controller/   TripController, AdminController, AuthController, GlobalExceptionHandler
+    │       ├── dto/          Request / response DTOs and Kafka event payloads
     │       ├── domain/       Coordinate, GpsPing, AnchorPoint, SegmentResult, TripEvidence,
     │       │                 TripDistanceResult, RecomputeDelta, EngineConfig, DistanceRule, ...
     │       ├── engine/       StreamCleaner, AnchorPatchEngine, SegmentCalculatorEngine,
     │       │                 TripDistanceRebuildingEngine
-    │       ├── routing/      RoutingService, RoutingCache, RoutingRateLimiter,
-    │       │                 RoutingCircuitBreaker, RoutingProvider, SimulatedRoutingProvider
+    │       ├── routing/      RoutingService, RoutingCache, RedisRouteStorage, SpringDataRedisRouteStorage,
+    │       │                 RoutingRateLimiter, RoutingCircuitBreaker, RoutingProvider,
+    │       │                 SimulatedRoutingProvider, OsrmRoutingProvider
+    │       ├── kafka/        TripEvents, TripKafkaBufferService, TripKafkaProducer,
+    │       │                 TripKafkaConsumer, OutboxRelayService
     │       ├── scaling/      BatchTripProcessor, ParallelTripProcessor
-    │       ├── entity/       TripEntity, TripSegmentEntity, TripAdjustmentEntity
-    │       ├── repository/   TripRepository, TripAdjustmentRepository
-    │       ├── service/      TripDistanceService, TripBatchService
-    │       ├── security/     TenantFilter, TenantContext, SecurityConfig, PiiMasker
+    │       ├── entity/       TripEntity, TripSegmentEntity, TripAdjustmentEntity, OutboxEventEntity
+    │       ├── repository/   TripRepository, TripAdjustmentRepository, OutboxEventRepository
+    │       ├── service/      TripCalculationExecutor, TripDistanceService, TripBatchService
+    │       ├── security/     TenantFilter, TenantContext, SecurityConfig, JwtTokenProvider, PiiMasker
     │       └── monitoring/   EngineMetrics
-    └── test/java/com/moveinsync/distance     # 14 test classes (see Section 16)
+    └── test/java/com/moveinsync/distance     # 17 test classes / 55 tests (see Section 16)
 ```
 
 | Package | Depends on Spring? | Responsibility |
 | :--- | :-: | :--- |
-| `domain`, `engine`, `routing`, `scaling` | No | Business rules, distance math, resilience primitives |
-| `controller`, `service`, `entity`, `repository`, `security`, `config`, `monitoring` | Yes | HTTP, transactions, persistence, tenancy, metrics |
+| `domain`, `engine`, `scaling` | No | Business rules, distance math, concurrency primitives |
+| `routing` | Optional | Core routing interfaces & in-memory cache are POJO; Redis integration is Spring-aware |
+| `controller`, `service`, `kafka`, `entity`, `repository`, `security`, `config`, `monitoring` | Yes | HTTP, stream ingestion, transactional outbox, persistence, JWT auth, metrics |
 
 ---
 

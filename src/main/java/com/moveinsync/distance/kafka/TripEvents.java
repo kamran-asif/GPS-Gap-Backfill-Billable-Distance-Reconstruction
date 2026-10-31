@@ -51,3 +51,4 @@ public final class TripEvents {
             Instant createdAt
     ) implements Serializable {}
 }
+

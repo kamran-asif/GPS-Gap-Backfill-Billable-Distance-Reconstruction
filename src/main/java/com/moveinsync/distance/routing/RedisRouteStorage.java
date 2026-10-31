@@ -10,3 +10,4 @@ public interface RedisRouteStorage {
     void put(String key, RouteResult result, Duration ttl);
     void invalidateAll();
 }
+
