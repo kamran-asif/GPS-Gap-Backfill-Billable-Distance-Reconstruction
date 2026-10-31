@@ -1,0 +1,14 @@
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://postgres:5432/moveinsync}
+    username: ${SPRING_DATASOURCE_USERNAME:moveinsync}
+    password: ${SPRING_DATASOURCE_PASSWORD:moveinsync_secret}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: update
+  h2:
+    console:
+      enabled: false
+
