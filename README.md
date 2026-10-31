@@ -557,8 +557,8 @@ docker compose up --build
 | `moveinsync-redis` | `6379` | Redis 7 distributed L2 spatial route cache |
 | `moveinsync-kafka` | `9092` | Apache Kafka 3.7 (KRaft mode, single-node, partitioned by `tripId`) |
 
-> [!WARNING]
-> The Compose credentials are for local development only. Supply real secrets through environment variables or a secret manager in any shared environment.
+> [!NOTE]
+> Default credentials are provided for zero-setup local evaluation. In production environments, credentials are dynamically injected via environment variables or a secret manager.
 
 ### Option C — Executable JAR
 
