@@ -1,6 +1,6 @@
 <div align="center">
 
-# Trip Distance Rebuilding Engine
+# GPS-Gap-Backfill-Billable-Distance-Reconstruction
 
 **Billing-grade reconstruction of cab trip distance from noisy, interrupted GPS telemetry — with a per-segment audit trail and an append-only adjustment ledger.**
 
