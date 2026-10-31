@@ -925,7 +925,7 @@ FROM trips ORDER BY trip_id, version;
 SELECT trip_id, previous_version, new_version, formatted_delta, adjustment_type, reason
 FROM trip_adjustments ORDER BY id;
 
-SELECT version, segment_index, delta_seconds, final_distance_km, rule, explanation
+SELECT version, segment_index, delta_seconds, final_distance_km, rule_applied, explanation
 FROM trip_segments WHERE trip_id = 'TRIP-BLR-1001' ORDER BY version, segment_index;
 ```
 
